@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="120"
+  height="120"
+  viewBox="0 0 120 120">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#111827" />
+      <stop offset="100%" stop-color="#1f2937" />
+    </linearGradient>
+  </defs>
+
+  <rect x="0" y="0" width="120" height="120" fill="url(#bg)">
+    <animate
+      attributeName="opacity"
+      values="0.85;1;0.85"
+      dur="2s"
+      repeatCount="indefinite" />
+  </rect>
+
+  <circle cx="20" cy="60" r="16" fill="#ff6a00">
+    <animate
+      attributeName="cx"
+      values="20;100;20"
+      dur="2s"
+      repeatCount="indefinite" />
+    <animate
+      attributeName="fill"
+      values="#ff6a00;#00d4ff;#ff6a00"
+      dur="2s"
+      repeatCount="indefinite" />
+  </circle>
+
+  <g>
+    <rect x="56" y="14" width="8" height="22" rx="4" fill="#ffffff">
+      <animateTransform
+        attributeName="transform"
+        type="rotate"
+        from="0 60 60"
+        to="360 60 60"
+        dur="1.5s"
+        repeatCount="indefinite" />
+    </rect>
+  </g>
+</svg>

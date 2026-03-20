@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"fmt"
+
 	"github.com/scryner/my-streamdeck/internal/deckbutton"
 	"github.com/scryner/my-streamdeck/internal/widgets"
 	"rafaelmartins.com/p/streamdeck"
@@ -22,6 +24,10 @@ func init() {
 }
 
 func runClockWidget(_ *cobra.Command, _ []string) error {
+	if streamdeck.KeyID(clockKey) == streamdeck.KEY_2 {
+		return fmt.Errorf("key 2 is reserved for the calendar widget")
+	}
+
 	device, err := streamdeck.GetDevice("")
 	if err != nil {
 		return err
@@ -40,10 +46,18 @@ func runClockWidget(_ *cobra.Command, _ []string) error {
 		return err
 	}
 
+	calendarWidget, err := widgets.NewCalendarWidget(widgets.CalendarWidgetOptions{
+		Key:  streamdeck.KEY_2,
+		Size: widgets.DefaultClockWidgetSize,
+	})
+	if err != nil {
+		return err
+	}
+
 	controller := deckbutton.NewController(device)
 	defer controller.Close()
 
-	if err := controller.RegisterButtons(widget.Button()); err != nil {
+	if err := controller.RegisterButtons(widget.Button(), calendarWidget.Button()); err != nil {
 		return err
 	}
 

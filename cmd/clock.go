@@ -24,8 +24,11 @@ func init() {
 }
 
 func runClockWidget(_ *cobra.Command, _ []string) error {
-	if streamdeck.KeyID(clockKey) == streamdeck.KEY_2 {
+	switch streamdeck.KeyID(clockKey) {
+	case streamdeck.KEY_2:
 		return fmt.Errorf("key 2 is reserved for the calendar widget")
+	case streamdeck.KEY_3:
+		return fmt.Errorf("key 3 is reserved for the sysstat widget")
 	}
 
 	device, err := streamdeck.GetDevice("")
@@ -54,10 +57,18 @@ func runClockWidget(_ *cobra.Command, _ []string) error {
 		return err
 	}
 
+	sysstatWidget, err := widgets.NewSysstatWidget(widgets.SysstatWidgetOptions{
+		Key:  streamdeck.KEY_3,
+		Size: widgets.DefaultClockWidgetSize,
+	})
+	if err != nil {
+		return err
+	}
+
 	controller := deckbutton.NewController(device)
 	defer controller.Close()
 
-	if err := controller.RegisterButtons(widget.Button(), calendarWidget.Button()); err != nil {
+	if err := controller.RegisterButtons(widget.Button(), calendarWidget.Button(), sysstatWidget.Button()); err != nil {
 		return err
 	}
 

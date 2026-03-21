@@ -129,5 +129,6 @@ const configTemplate = `widgets:
   - type: qui
 settings:
   - weather.location: INPUT-YOUR-WEATHER-LOCATION
+  - qui.base_url: INPUT-YOUR-QUI-BASE-URL
   - qui.access_token: INPUT-YOUR-QUI-ACCESS-TOKEN
 `

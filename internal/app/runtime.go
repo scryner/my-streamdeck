@@ -6,6 +6,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/scryner/my-streamdeck/internal/deckbutton"
 	"github.com/scryner/my-streamdeck/internal/widgets"
@@ -83,9 +84,15 @@ func (r *Runtime) Close() {
 			r.controller.Close()
 		}
 		if r.device != nil && r.device.IsOpen() {
+			if err := clearDisplays(r.device); err != nil {
+				log.Printf("clear stream deck displays: %v", err)
+			}
 			_ = r.device.Close()
 		}
-		<-r.doneCh
+		select {
+		case <-r.doneCh:
+		case <-time.After(200 * time.Millisecond):
+		}
 	})
 }
 
@@ -231,6 +238,26 @@ func clearUnusedKeys(device *streamdeck.Device, usedKeys map[streamdeck.KeyID]st
 		}
 		return device.SetKeyColor(key, black)
 	})
+}
+
+func clearDisplays(device *streamdeck.Device) error {
+	if err := device.ForEachKey(device.ClearKey); err != nil {
+		return err
+	}
+	if err := device.ForEachTouchPoint(device.ClearTouchPoint); err != nil {
+		return err
+	}
+	if device.GetInfoBarSupported() {
+		if err := device.ClearInfoBar(); err != nil {
+			return err
+		}
+	}
+	if device.GetTouchStripSupported() {
+		if err := device.ClearTouchStrip(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func minInt(a, b int) int {

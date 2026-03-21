@@ -35,7 +35,7 @@ func RunMenuBar() error {
 			rt := runtime
 			mu.Unlock()
 			if rt != nil {
-				go rt.Close()
+				rt.Close()
 			}
 			systray.Quit()
 		}()

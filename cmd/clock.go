@@ -12,6 +12,7 @@ import (
 
 var clockKey uint8
 var netInterface string
+var weatherLocation string
 
 var clockCmd = &cobra.Command{
 	Use:   "clock",
@@ -23,6 +24,7 @@ func init() {
 	rootCmd.AddCommand(clockCmd)
 	clockCmd.Flags().Uint8Var(&clockKey, "key", uint8(streamdeck.KEY_1), "Target key id")
 	clockCmd.Flags().StringVar(&netInterface, "net-iface", "en0", "Network interface for the netstat widget")
+	clockCmd.Flags().StringVar(&weatherLocation, "weather-location", "Seoul", "Location for the weather widgets")
 }
 
 func runClockWidget(_ *cobra.Command, _ []string) error {
@@ -33,6 +35,10 @@ func runClockWidget(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("key 3 is reserved for the sysstat widget")
 	case streamdeck.KEY_4:
 		return fmt.Errorf("key 4 is reserved for the netstat widget")
+	case streamdeck.KEY_5:
+		return fmt.Errorf("key 5 is reserved for the weather today widget")
+	case streamdeck.KEY_6:
+		return fmt.Errorf("key 6 is reserved for the weather forecast widget")
 	}
 
 	device, err := streamdeck.GetDevice("")
@@ -78,10 +84,25 @@ func runClockWidget(_ *cobra.Command, _ []string) error {
 		return err
 	}
 
+	weatherWidget, err := widgets.NewWeatherWidget(widgets.WeatherWidgetOptions{
+		Location: weatherLocation,
+		Size:     widgets.DefaultClockWidgetSize,
+	})
+	if err != nil {
+		return err
+	}
+
 	controller := deckbutton.NewController(device)
 	defer controller.Close()
 
-	if err := controller.RegisterButtons(widget.Button(), calendarWidget.Button(), sysstatWidget.Button(), netstatWidget.Button()); err != nil {
+	if err := controller.RegisterButtons(
+		widget.Button(),
+		calendarWidget.Button(),
+		sysstatWidget.Button(),
+		netstatWidget.Button(),
+		weatherWidget.Today(streamdeck.KEY_5).Button(),
+		weatherWidget.Forecast(streamdeck.KEY_6).Button(),
+	); err != nil {
 		return err
 	}
 

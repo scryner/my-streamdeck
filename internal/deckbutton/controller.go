@@ -21,10 +21,11 @@ type FrameSource interface {
 
 // Animation defines how a key animation should be played.
 type Animation struct {
-	Source    FrameSource
-	FrameRate int
-	Duration  time.Duration
-	Loop      bool
+	Source         FrameSource
+	FrameRate      int
+	UpdateInterval time.Duration
+	Duration       time.Duration
+	Loop           bool
 }
 
 // Button represents a configurable Stream Deck key.
@@ -71,8 +72,8 @@ func (c *Controller) RegisterButtons(buttons ...Button) error {
 		if button.Animation.Source == nil {
 			return fmt.Errorf("animation source is required for %s", button.Key)
 		}
-		if button.Animation.FrameRate <= 0 {
-			return fmt.Errorf("animation frame rate must be > 0 for %s", button.Key)
+		if button.Animation.FrameRate <= 0 && button.Animation.UpdateInterval <= 0 {
+			return fmt.Errorf("animation frame rate or update interval is required for %s", button.Key)
 		}
 
 		if err := button.Animation.Source.Start(c.ctx); err != nil {
@@ -108,7 +109,10 @@ func (c *Controller) runAnimation(button Button) error {
 	anim := button.Animation
 	defer anim.Source.Close()
 
-	interval := time.Second / time.Duration(anim.FrameRate)
+	interval := anim.UpdateInterval
+	if interval <= 0 {
+		interval = time.Second / time.Duration(anim.FrameRate)
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 

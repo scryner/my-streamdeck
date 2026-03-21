@@ -55,6 +55,7 @@ type caffeinateSource struct {
 	pressed    bool
 	pressStart time.Time
 	enabledAt  time.Time
+	updates    chan struct{}
 }
 
 type caffeinateFaces struct {
@@ -94,6 +95,7 @@ func NewCaffeinateWidget(options CaffeinateWidgetOptions) (*CaffeinateWidget, er
 			state:     options.Backend,
 			faces:     faces,
 			enabledAt: initialEnabledAt(options.Backend, options.Now),
+			updates:   make(chan struct{}, 1),
 		},
 	}, nil
 }
@@ -192,6 +194,23 @@ func (s *caffeinateSource) Start(context.Context) error {
 	return nil
 }
 
+func (s *caffeinateSource) NextFrameDelay() time.Duration {
+	s.mu.RLock()
+	pressed := s.pressed
+	s.mu.RUnlock()
+	if pressed {
+		return time.Second / caffeinateWidgetFrameRate
+	}
+	if s.state != nil && s.state.Enabled() {
+		return time.Second
+	}
+	return 0
+}
+
+func (s *caffeinateSource) Updates() <-chan struct{} {
+	return s.updates
+}
+
 func (s *caffeinateSource) FrameAt(ctx context.Context, _ time.Duration) (image.Image, error) {
 	select {
 	case <-ctx.Done():
@@ -222,6 +241,7 @@ func (s *caffeinateSource) beginPress(now time.Time) uint64 {
 	s.pressToken++
 	s.pressed = true
 	s.pressStart = now
+	s.notifyUpdate()
 	return s.pressToken
 }
 
@@ -239,18 +259,21 @@ func (s *caffeinateSource) endPress(token uint64) {
 		return
 	}
 	s.pressed = false
+	s.notifyUpdate()
 }
 
 func (s *caffeinateSource) markEnabled(now time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.enabledAt = now
+	s.notifyUpdate()
 }
 
 func (s *caffeinateSource) markDisabled() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.enabledAt = time.Time{}
+	s.notifyUpdate()
 }
 
 func (s *caffeinateSource) enabledSince() (time.Time, bool) {
@@ -260,6 +283,16 @@ func (s *caffeinateSource) enabledSince() (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return s.enabledAt, true
+}
+
+func (s *caffeinateSource) notifyUpdate() {
+	if s.updates == nil {
+		return
+	}
+	select {
+	case s.updates <- struct{}{}:
+	default:
+	}
 }
 
 func (s *caffeinateSource) holdProgress(now time.Time) float64 {

@@ -159,6 +159,45 @@ func TestCaffeinateReleaseTogglePolicy(t *testing.T) {
 	}
 }
 
+func TestCaffeinateSourceNextFrameDelay(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.March, 21, 12, 0, 0, 0, time.UTC)
+	backend := &fakeCaffeinateBackend{}
+	source := &caffeinateSource{
+		size:    DefaultClockWidgetSize,
+		now:     func() time.Time { return now },
+		state:   backend,
+		updates: make(chan struct{}, 4),
+	}
+
+	if got := source.NextFrameDelay(); got != 0 {
+		t.Fatalf("expected no periodic updates while idle, got %s", got)
+	}
+
+	token := source.beginPress(now)
+	if got := source.NextFrameDelay(); got != time.Second/caffeinateWidgetFrameRate {
+		t.Fatalf("expected hold updates at %s, got %s", time.Second/caffeinateWidgetFrameRate, got)
+	}
+
+	source.endPress(token)
+	if got := source.NextFrameDelay(); got != 0 {
+		t.Fatalf("expected no periodic updates after release, got %s", got)
+	}
+
+	backend.enabled = true
+	source.markEnabled(now)
+	if got := source.NextFrameDelay(); got != time.Second {
+		t.Fatalf("expected enabled updates at 1s, got %s", got)
+	}
+
+	backend.enabled = false
+	source.markDisabled()
+	if got := source.NextFrameDelay(); got != 0 {
+		t.Fatalf("expected no periodic updates after disable, got %s", got)
+	}
+}
+
 func TestCaffeinateWidgetRendersExpectedBounds(t *testing.T) {
 	t.Parallel()
 

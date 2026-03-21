@@ -19,6 +19,16 @@ type FrameSource interface {
 	Close() error
 }
 
+// FrameSourceWithDynamicDelay can adjust its next render deadline based on current state.
+type FrameSourceWithDynamicDelay interface {
+	NextFrameDelay() time.Duration
+}
+
+// FrameSourceWithUpdates can wake the controller when state changes outside the regular cadence.
+type FrameSourceWithUpdates interface {
+	Updates() <-chan struct{}
+}
+
 // Animation defines how a key animation should be played.
 type Animation struct {
 	Source         FrameSource
@@ -43,15 +53,17 @@ type Controller struct {
 	cancel context.CancelFunc
 
 	setImageMu sync.Mutex
+	lastFrame  map[streamdeck.KeyID]image.Image
 	wg         sync.WaitGroup
 }
 
 func NewController(device *streamdeck.Device) *Controller {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Controller{
-		device: device,
-		ctx:    ctx,
-		cancel: cancel,
+		device:    device,
+		ctx:       ctx,
+		cancel:    cancel,
+		lastFrame: map[streamdeck.KeyID]image.Image{},
 	}
 }
 
@@ -109,10 +121,74 @@ func (c *Controller) runAnimation(button Button) error {
 	anim := button.Animation
 	defer anim.Source.Close()
 
-	interval := anim.UpdateInterval
-	if interval <= 0 {
-		interval = time.Second / time.Duration(anim.FrameRate)
+	if _, ok := anim.Source.(FrameSourceWithDynamicDelay); !ok {
+		if _, ok := anim.Source.(FrameSourceWithUpdates); !ok {
+			return c.runFixedAnimation(button)
+		}
 	}
+
+	duration := anim.Duration
+	if duration <= 0 {
+		duration = anim.Source.Duration()
+	}
+
+	startedAt := time.Now()
+	updates := updatesChannel(anim.Source)
+	timer := time.NewTimer(time.Hour)
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	defer timer.Stop()
+
+	scheduleNext := func() {
+		delay := nextFrameDelay(anim)
+		if delay <= 0 {
+			return
+		}
+		timer.Reset(delay)
+	}
+
+	scheduleNext()
+	for {
+		select {
+		case <-c.ctx.Done():
+			return nil
+		case <-timer.C:
+			elapsed := time.Since(startedAt)
+			frameTime, isLast := normalizeFrameTime(elapsed, duration, anim.Loop)
+			if err := c.renderFrame(button.Key, anim.Source, frameTime); err != nil {
+				return fmt.Errorf("render frame for %s: %w", button.Key, err)
+			}
+			if isLast {
+				return nil
+			}
+			scheduleNext()
+		case <-updates:
+			elapsed := time.Since(startedAt)
+			frameTime, isLast := normalizeFrameTime(elapsed, duration, anim.Loop)
+			if err := c.renderFrame(button.Key, anim.Source, frameTime); err != nil {
+				return fmt.Errorf("render frame for %s: %w", button.Key, err)
+			}
+			if isLast {
+				return nil
+			}
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			scheduleNext()
+		}
+	}
+}
+
+func (c *Controller) runFixedAnimation(button Button) error {
+	anim := button.Animation
+	interval := nextFrameDelay(anim)
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -147,7 +223,52 @@ func (c *Controller) renderFrame(key streamdeck.KeyID, source FrameSource, elaps
 
 	c.setImageMu.Lock()
 	defer c.setImageMu.Unlock()
-	return c.device.SetKeyImage(key, img)
+	if prev, ok := c.lastFrame[key]; ok && imagesEqual(prev, img) {
+		return nil
+	}
+	if err := c.device.SetKeyImage(key, img); err != nil {
+		return err
+	}
+	c.lastFrame[key] = img
+	return nil
+}
+
+func nextFrameDelay(anim *Animation) time.Duration {
+	if source, ok := anim.Source.(FrameSourceWithDynamicDelay); ok {
+		return source.NextFrameDelay()
+	}
+	if anim.UpdateInterval > 0 {
+		return anim.UpdateInterval
+	}
+	return time.Second / time.Duration(anim.FrameRate)
+}
+
+func updatesChannel(source FrameSource) <-chan struct{} {
+	if sourceWithUpdates, ok := source.(FrameSourceWithUpdates); ok {
+		return sourceWithUpdates.Updates()
+	}
+	return nil
+}
+
+func imagesEqual(a image.Image, b image.Image) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	if !a.Bounds().Eq(b.Bounds()) {
+		return false
+	}
+
+	bounds := a.Bounds()
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			ar, ag, ab, aa := a.At(x, y).RGBA()
+			br, bg, bb, ba := b.At(x, y).RGBA()
+			if ar != br || ag != bg || ab != bb || aa != ba {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func normalizeFrameTime(elapsed time.Duration, duration time.Duration, loop bool) (time.Duration, bool) {

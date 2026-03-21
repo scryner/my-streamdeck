@@ -11,6 +11,7 @@ import (
 )
 
 var clockKey uint8
+var netInterface string
 
 var clockCmd = &cobra.Command{
 	Use:   "clock",
@@ -21,6 +22,7 @@ var clockCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(clockCmd)
 	clockCmd.Flags().Uint8Var(&clockKey, "key", uint8(streamdeck.KEY_1), "Target key id")
+	clockCmd.Flags().StringVar(&netInterface, "net-iface", "en0", "Network interface for the netstat widget")
 }
 
 func runClockWidget(_ *cobra.Command, _ []string) error {
@@ -29,6 +31,8 @@ func runClockWidget(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("key 2 is reserved for the calendar widget")
 	case streamdeck.KEY_3:
 		return fmt.Errorf("key 3 is reserved for the sysstat widget")
+	case streamdeck.KEY_4:
+		return fmt.Errorf("key 4 is reserved for the netstat widget")
 	}
 
 	device, err := streamdeck.GetDevice("")
@@ -65,10 +69,19 @@ func runClockWidget(_ *cobra.Command, _ []string) error {
 		return err
 	}
 
+	netstatWidget, err := widgets.NewNetstatWidget(widgets.NetstatWidgetOptions{
+		Key:       streamdeck.KEY_4,
+		Size:      widgets.DefaultClockWidgetSize,
+		Interface: netInterface,
+	})
+	if err != nil {
+		return err
+	}
+
 	controller := deckbutton.NewController(device)
 	defer controller.Close()
 
-	if err := controller.RegisterButtons(widget.Button(), calendarWidget.Button(), sysstatWidget.Button()); err != nil {
+	if err := controller.RegisterButtons(widget.Button(), calendarWidget.Button(), sysstatWidget.Button(), netstatWidget.Button()); err != nil {
 		return err
 	}
 

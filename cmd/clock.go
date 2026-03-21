@@ -39,6 +39,8 @@ func runClockWidget(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("key 5 is reserved for the weather today widget")
 	case streamdeck.KEY_6:
 		return fmt.Errorf("key 6 is reserved for the weather forecast widget")
+	case streamdeck.KEY_7:
+		return fmt.Errorf("key 7 is reserved for the caffeinate widget")
 	}
 
 	device, err := streamdeck.GetDevice("")
@@ -92,6 +94,14 @@ func runClockWidget(_ *cobra.Command, _ []string) error {
 		return err
 	}
 
+	caffeinateWidget, err := widgets.NewCaffeinateWidget(widgets.CaffeinateWidgetOptions{
+		Key:  streamdeck.KEY_7,
+		Size: widgets.DefaultClockWidgetSize,
+	})
+	if err != nil {
+		return err
+	}
+
 	controller := deckbutton.NewController(device)
 	defer controller.Close()
 
@@ -102,6 +112,7 @@ func runClockWidget(_ *cobra.Command, _ []string) error {
 		netstatWidget.Button(),
 		weatherWidget.Today(streamdeck.KEY_5).Button(),
 		weatherWidget.Forecast(streamdeck.KEY_6).Button(),
+		caffeinateWidget.Button(),
 	); err != nil {
 		return err
 	}

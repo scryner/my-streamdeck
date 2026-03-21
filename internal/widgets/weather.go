@@ -7,6 +7,7 @@ import (
 	"image"
 	"image/color"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -74,9 +75,9 @@ const (
 )
 
 type weatherFaces struct {
-	title          font.Face
-	temp           font.Face
-	detail         font.Face
+	todayDetail    font.Face
+	todayTemp      font.Face
+	today          font.Face
 	forecastMain   font.Face
 	forecastDetail font.Face
 }
@@ -409,17 +410,17 @@ func loadWeatherFaces(size int) (weatherFaces, error) {
 	}
 
 	scale := float64(size) / 72.0
-	title, err := newFace(gobold.TTF, 7.5*scale)
+	today, err := newFace(gobold.TTF, 9.5*scale)
 	if err != nil {
-		return weatherFaces{}, fmt.Errorf("load weather title font: %w", err)
+		return weatherFaces{}, fmt.Errorf("load weather today font: %w", err)
 	}
-	temp, err := newFace(gobold.TTF, 18*scale)
-	if err != nil {
-		return weatherFaces{}, fmt.Errorf("load weather temp font: %w", err)
-	}
-	detail, err := newFace(gomono.TTF, 7.5*scale)
+	todayDetail, err := newFace(gobold.TTF, 13.5*scale)
 	if err != nil {
 		return weatherFaces{}, fmt.Errorf("load weather detail font: %w", err)
+	}
+	todayTemp, err := newFace(gobold.TTF, 16*scale)
+	if err != nil {
+		return weatherFaces{}, fmt.Errorf("load weather temp font: %w", err)
 	}
 	forecastMain, err := newFace(gobold.TTF, 6.5*scale)
 	if err != nil {
@@ -431,9 +432,9 @@ func loadWeatherFaces(size int) (weatherFaces, error) {
 	}
 
 	faces := weatherFaces{
-		title:          title,
-		temp:           temp,
-		detail:         detail,
+		todayDetail:    todayDetail,
+		todayTemp:      todayTemp,
+		today:          today,
 		forecastMain:   forecastMain,
 		forecastDetail: forecastDetail,
 	}
@@ -442,19 +443,25 @@ func loadWeatherFaces(size int) (weatherFaces, error) {
 }
 
 func (s *weatherViewSource) renderLoading(dst *image.RGBA) {
-	fillVerticalGradient(dst, color.RGBA{R: 18, G: 23, B: 33, A: 255}, color.RGBA{R: 10, G: 14, B: 24, A: 255})
-	drawCenteredText(dst, s.widget.faces.title, stringsUpper(s.widget.location), float64(s.widget.size)/2, float64(scaledValue(s.widget.size, 12)), color.RGBA{R: 135, G: 201, B: 255, A: 255})
-	drawCenteredText(dst, s.widget.faces.temp, "Loading", float64(s.widget.size)/2, centeredTextBaselineY(s.widget.faces.temp, float64(s.widget.size)*0.48), color.RGBA{R: 244, G: 246, B: 248, A: 255})
+	drawCenteredText(dst, s.widget.faces.today, "Loading", float64(s.widget.size)/2, centeredTextBaselineY(s.widget.faces.today, float64(s.widget.size)*0.48), color.RGBA{R: 244, G: 246, B: 248, A: 255})
 }
 
 func (s *weatherViewSource) renderToday(dst *image.RGBA, snapshot weatherSnapshot) {
-	fillVerticalGradient(dst, color.RGBA{R: 19, G: 32, B: 52, A: 255}, color.RGBA{R: 10, G: 18, B: 32, A: 255})
-
 	centerX := float64(s.widget.size) / 2
-	drawCenteredText(dst, s.widget.faces.title, stringsUpper(snapshot.Location), centerX, float64(scaledValue(s.widget.size, 12)), color.RGBA{R: 145, G: 217, B: 255, A: 255})
-	drawCenteredText(dst, s.widget.faces.temp, snapshot.Current.TempC+"C", centerX, centeredTextBaselineY(s.widget.faces.temp, float64(s.widget.size)*0.42), color.RGBA{R: 247, G: 248, B: 250, A: 255})
-	drawCenteredText(dst, s.widget.faces.detail, snapshot.Current.Condition, centerX, centeredTextBaselineY(s.widget.faces.detail, float64(s.widget.size)*0.68), color.RGBA{R: 210, G: 226, B: 241, A: 255})
-	drawCenteredText(dst, s.widget.faces.detail, "UV "+valueOrDash(snapshot.Current.UVIndex), centerX, centeredTextBaselineY(s.widget.faces.detail, float64(s.widget.size)*0.83), color.RGBA{R: 255, G: 212, B: 109, A: 255})
+	rowHeight := float64(s.widget.size) / 4
+	todayRange := weatherDay{}
+	if len(snapshot.Days) > 0 {
+		todayRange = snapshot.Days[0]
+	}
+
+	drawCenteredText(dst, s.widget.faces.todayDetail, snapshot.Current.Condition, centerX, centeredTextBaselineY(s.widget.faces.todayDetail, rowHeight*0.58), color.RGBA{R: 116, G: 236, B: 255, A: 255})
+	drawSuperscriptTemperature(dst, s.widget.faces.todayTemp, snapshot.Current.TempC, centerX, centeredTextBaselineY(s.widget.faces.todayTemp, rowHeight*1.46), color.RGBA{R: 247, G: 248, B: 250, A: 255})
+	lineY := int(rowHeight * 2)
+	for x := range s.widget.size {
+		dst.SetRGBA(x, lineY, color.RGBA{R: 88, G: 101, B: 118, A: 255})
+	}
+	drawTemperatureRange(dst, s.widget.faces.today, todayRange.MinTempC, todayRange.MaxTempC, centerX, centeredTextBaselineY(s.widget.faces.today, rowHeight*2.56), color.RGBA{R: 204, G: 220, B: 235, A: 255})
+	drawCenteredText(dst, s.widget.faces.today, "UV "+valueOrDash(snapshot.Current.UVIndex), centerX, centeredTextBaselineY(s.widget.faces.today, rowHeight*3.42), color.RGBA{R: 255, G: 212, B: 109, A: 255})
 }
 
 func (s *weatherViewSource) renderForecast(dst *image.RGBA, snapshot weatherSnapshot) {
@@ -494,4 +501,56 @@ func valueOrDash(value string) string {
 		return "--"
 	}
 	return value
+}
+
+func drawSuperscriptTemperature(dst *image.RGBA, face font.Face, value string, centerX float64, baselineY float64, c color.RGBA) {
+	value = valueOrDash(value)
+	valueWidth := measureTextWidth(face, value)
+	gap := float64(scaledValue(dst.Bounds().Dx(), 1))
+	degreeDiameter := float64(scaledValue(dst.Bounds().Dx(), 4))
+	totalWidth := valueWidth + gap + degreeDiameter
+	startX := centerX - (totalWidth / 2)
+
+	drawCenteredText(dst, face, value, startX+(valueWidth/2), baselineY, c)
+	drawDegreeMarker(
+		dst,
+		startX+valueWidth+gap+(degreeDiameter/2),
+		baselineY-float64(scaledValue(dst.Bounds().Dx(), 6)),
+		degreeDiameter/2,
+		c,
+	)
+}
+
+func drawTemperatureRange(dst *image.RGBA, face font.Face, minTemp string, maxTemp string, centerX float64, baselineY float64, c color.RGBA) {
+	minText := valueOrDash(minTemp)
+	maxText := valueOrDash(maxTemp)
+	separator := " / "
+
+	minWidth := measureTextWidth(face, minText)
+	maxWidth := measureTextWidth(face, maxText)
+	separatorWidth := measureTextWidth(face, separator)
+	gap := float64(scaledValue(dst.Bounds().Dx(), 1))
+	degreeDiameter := float64(scaledValue(dst.Bounds().Dx(), 3))
+	totalWidth := minWidth + gap + degreeDiameter + separatorWidth + maxWidth + gap + degreeDiameter
+	startX := centerX - (totalWidth / 2)
+	superscriptOffset := float64(scaledValue(dst.Bounds().Dx(), 5))
+
+	drawCenteredText(dst, face, minText, startX+(minWidth/2), baselineY, c)
+	startX += minWidth + gap
+	drawDegreeMarker(dst, startX+(degreeDiameter/2), baselineY-superscriptOffset, degreeDiameter/2, c)
+	startX += degreeDiameter
+	drawCenteredText(dst, face, separator, startX+(separatorWidth/2), baselineY, c)
+	startX += separatorWidth
+	drawCenteredText(dst, face, maxText, startX+(maxWidth/2), baselineY, c)
+	startX += maxWidth + gap
+	drawDegreeMarker(dst, startX+(degreeDiameter/2), baselineY-superscriptOffset, degreeDiameter/2, c)
+}
+
+func drawDegreeMarker(dst *image.RGBA, centerX float64, centerY float64, radius float64, c color.RGBA) {
+	strokeWidth := math.Max(1, float64(scaledValue(dst.Bounds().Dx(), 1)))
+	innerRadius := radius - strokeWidth
+	if innerRadius < 0 {
+		innerRadius = 0
+	}
+	drawRing(dst, centerX, centerY, radius, innerRadius, c)
 }

@@ -17,9 +17,10 @@ var quiBaseURL string
 var quiAPIKey string
 
 var clockCmd = &cobra.Command{
-	Use:   "clock",
-	Short: "Run the clock widget",
-	RunE:  runClockWidget,
+	Use:    "clock",
+	Short:  "Run the clock widget",
+	RunE:   runClockWidget,
+	Hidden: true,
 }
 
 func init() {

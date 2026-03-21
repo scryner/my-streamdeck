@@ -19,9 +19,10 @@ var (
 )
 
 var runCmd = &cobra.Command{
-	Use:   "run",
-	Short: "Run Stream Deck key listener",
-	RunE:  runStreamDeck,
+	Use:    "run",
+	Short:  "Run Stream Deck key listener",
+	RunE:   runStreamDeck,
+	Hidden: true,
 }
 
 func init() {

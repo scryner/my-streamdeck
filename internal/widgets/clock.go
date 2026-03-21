@@ -43,10 +43,11 @@ func (m ClockMode) String() string {
 }
 
 type ClockWidgetOptions struct {
-	Key      streamdeck.KeyID
-	Size     int
-	Location *time.Location
-	Now      func() time.Time
+	Key         streamdeck.KeyID
+	Size        int
+	Location    *time.Location
+	Now         func() time.Time
+	InitialMode ClockMode
 }
 
 type ClockWidget struct {
@@ -65,7 +66,7 @@ func NewClockWidget(options ClockWidgetOptions) (*ClockWidget, error) {
 		options.Now = time.Now
 	}
 
-	source, err := newClockSource(options.Size, options.Location, options.Now)
+	source, err := newClockSource(options.Size, options.Location, options.Now, options.InitialMode)
 	if err != nil {
 		return nil, err
 	}
@@ -120,10 +121,14 @@ type clockFaces struct {
 	tiny  font.Face
 }
 
-func newClockSource(size int, location *time.Location, now func() time.Time) (*clockSource, error) {
+func newClockSource(size int, location *time.Location, now func() time.Time, initialMode ClockMode) (*clockSource, error) {
 	faces, err := loadClockFaces(size)
 	if err != nil {
 		return nil, err
+	}
+
+	if initialMode != ClockModeDigital {
+		initialMode = ClockModeAnalog
 	}
 
 	return &clockSource{
@@ -131,7 +136,7 @@ func newClockSource(size int, location *time.Location, now func() time.Time) (*c
 		location: location,
 		now:      now,
 		faces:    faces,
-		mode:     ClockModeAnalog,
+		mode:     initialMode,
 	}, nil
 }
 

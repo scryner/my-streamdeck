@@ -76,6 +76,23 @@ func TestClockWidgetToggleChangesRenderedFrame(t *testing.T) {
 	}
 }
 
+func TestClockWidgetSupportsInitialDigitalMode(t *testing.T) {
+	t.Parallel()
+
+	widget, err := NewClockWidget(ClockWidgetOptions{
+		Key:         streamdeck.KEY_1,
+		Now:         func() time.Time { return time.Date(2026, time.March, 20, 10, 15, 30, 250_000_000, time.UTC) },
+		InitialMode: ClockModeDigital,
+	})
+	if err != nil {
+		t.Fatalf("NewClockWidget: %v", err)
+	}
+
+	if widget.Mode() != ClockModeDigital {
+		t.Fatalf("expected initial mode digital, got %s", widget.Mode())
+	}
+}
+
 func TestClockWidgetFrameAtConcurrent(t *testing.T) {
 	t.Parallel()
 

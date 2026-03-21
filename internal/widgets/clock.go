@@ -289,8 +289,6 @@ func (s *clockSource) renderAnalog(dst *image.RGBA, now time.Time) {
 }
 
 func (s *clockSource) renderDigital(dst *image.RGBA, now time.Time) {
-	fillVerticalGradient(dst, color.RGBA{R: 7, G: 4, B: 20, A: 255}, color.RGBA{R: 18, G: 7, B: 44, A: 255})
-
 	digitWidth := float64(scaledValue(s.size, 13))
 	digitHeight := float64(scaledValue(s.size, 26))
 	thickness := float64(scaledValue(s.size, 3))

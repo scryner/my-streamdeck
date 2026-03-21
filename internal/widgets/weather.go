@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/scryner/my-streamdeck/internal/deckbutton"
+	xdraw "golang.org/x/image/draw"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/gofont/gobold"
 	"golang.org/x/image/font/gofont/gomono"
@@ -99,6 +100,8 @@ type weatherDay struct {
 	MinTempC  string
 	MaxTempC  string
 	Condition string
+	IconURL   string
+	Icon      image.Image
 }
 
 type wttrResponse struct {
@@ -118,6 +121,9 @@ type wttrResponse struct {
 			WeatherDesc []struct {
 				Value string `json:"value"`
 			} `json:"weatherDesc"`
+			WeatherIconURL []struct {
+				Value string `json:"value"`
+			} `json:"weatherIconUrl"`
 		} `json:"hourly"`
 	} `json:"weather"`
 }
@@ -308,7 +314,35 @@ func (w *WeatherWidget) fetchSnapshot(ctx context.Context, location string) (wea
 		return weatherSnapshot{}, fmt.Errorf("read weather response: %w", err)
 	}
 
-	return parseWeatherSnapshot(body, location)
+	snapshot, err := parseWeatherSnapshot(body, location)
+	if err != nil {
+		return weatherSnapshot{}, err
+	}
+
+	return w.attachForecastIcons(ctx, snapshot), nil
+}
+
+func (w *WeatherWidget) fetchWeatherIcon(ctx context.Context, iconURL string) (image.Image, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, iconURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create weather icon request: %w", err)
+	}
+
+	resp, err := w.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch weather icon: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fetch weather icon: unexpected status %s", resp.Status)
+	}
+
+	icon, _, err := image.Decode(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("decode weather icon: %w", err)
+	}
+	return icon, nil
 }
 
 func parseWeatherSnapshot(body []byte, location string) (weatherSnapshot, error) {
@@ -332,11 +366,13 @@ func parseWeatherSnapshot(body []byte, location string) (weatherSnapshot, error)
 
 	for _, day := range payload.Weather {
 		parsedDate, _ := time.Parse("2006-01-02", day.Date)
+		condition, iconURL := selectForecastCondition(day.Hourly)
 		snapshot.Days = append(snapshot.Days, weatherDay{
 			Date:      parsedDate,
 			MinTempC:  cleanTemperature(day.MintempC),
 			MaxTempC:  cleanTemperature(day.MaxtempC),
-			Condition: cleanWeatherText(selectForecastCondition(day.Hourly), 16),
+			Condition: cleanWeatherText(condition, 16),
+			IconURL:   iconURL,
 		})
 		if len(snapshot.Days) == 3 {
 			break
@@ -344,6 +380,21 @@ func parseWeatherSnapshot(body []byte, location string) (weatherSnapshot, error)
 	}
 
 	return snapshot, nil
+}
+
+func (w *WeatherWidget) attachForecastIcons(ctx context.Context, snapshot weatherSnapshot) weatherSnapshot {
+	for i := range snapshot.Days {
+		if snapshot.Days[i].IconURL == "" {
+			continue
+		}
+		icon, err := w.fetchWeatherIcon(ctx, snapshot.Days[i].IconURL)
+		if err != nil {
+			continue
+		}
+		snapshot.Days[i].Icon = icon
+	}
+
+	return snapshot
 }
 
 func firstWeatherText(items []struct {
@@ -360,18 +411,22 @@ func selectForecastCondition(hourly []struct {
 	WeatherDesc []struct {
 		Value string `json:"value"`
 	} `json:"weatherDesc"`
-}) string {
+	WeatherIconURL []struct {
+		Value string `json:"value"`
+	} `json:"weatherIconUrl"`
+}) (string, string) {
 	if len(hourly) == 0 {
-		return ""
+		return "", ""
 	}
 
 	for _, slot := range hourly {
 		if strings.TrimSpace(slot.Time) == "1200" {
-			return firstWeatherText(slot.WeatherDesc)
+			return firstWeatherText(slot.WeatherDesc), firstWeatherText(slot.WeatherIconURL)
 		}
 	}
 
-	return firstWeatherText(hourly[len(hourly)/2].WeatherDesc)
+	mid := hourly[len(hourly)/2]
+	return firstWeatherText(mid.WeatherDesc), firstWeatherText(mid.WeatherIconURL)
 }
 
 func cleanTemperature(raw string) string {
@@ -465,15 +520,8 @@ func (s *weatherViewSource) renderToday(dst *image.RGBA, snapshot weatherSnapsho
 }
 
 func (s *weatherViewSource) renderForecast(dst *image.RGBA, snapshot weatherSnapshot) {
-	fillVerticalGradient(dst, color.RGBA{R: 16, G: 22, B: 34, A: 255}, color.RGBA{R: 9, G: 13, B: 22, A: 255})
-
 	rowHeight := s.widget.size / 3
-	for i := range 2 {
-		lineY := (i + 1) * rowHeight
-		for x := range s.widget.size {
-			dst.SetRGBA(x, lineY, color.RGBA{R: 71, G: 81, B: 97, A: 255})
-		}
-	}
+	iconColumnWidth := int(float64(s.widget.size) * 0.34)
 
 	for i := 0; i < 3; i++ {
 		if i >= len(snapshot.Days) {
@@ -481,18 +529,19 @@ func (s *weatherViewSource) renderForecast(dst *image.RGBA, snapshot weatherSnap
 		}
 
 		day := snapshot.Days[i]
-		centerY := float64(i*rowHeight) + (float64(rowHeight) / 2)
-		topLine := fmt.Sprintf("%s %sC/%sC", weekdayLabel(day.Date), day.MinTempC, day.MaxTempC)
-		drawCenteredText(dst, s.widget.faces.forecastMain, topLine, float64(s.widget.size)/2, centeredTextBaselineY(s.widget.faces.forecastMain, centerY-8), color.RGBA{R: 240, G: 243, B: 247, A: 255})
-		drawCenteredText(dst, s.widget.faces.forecastDetail, day.Condition, float64(s.widget.size)/2, centeredTextBaselineY(s.widget.faces.forecastDetail, centerY+9), color.RGBA{R: 173, G: 194, B: 214, A: 255})
-	}
-}
+		rowTop := i * rowHeight
+		rowBottom := rowTop + rowHeight
+		iconRect := image.Rect(
+			scaledValue(s.widget.size, 4),
+			rowTop+scaledValue(s.widget.size, 3),
+			iconColumnWidth-scaledValue(s.widget.size, 3),
+			rowBottom-scaledValue(s.widget.size, 3),
+		)
+		drawWeatherIcon(dst, day.Icon, iconRect)
 
-func weekdayLabel(date time.Time) string {
-	if date.IsZero() {
-		return "---"
+		valueCenterX := float64(iconColumnWidth) + (float64(s.widget.size-iconColumnWidth) / 2)
+		drawTemperatureRange(dst, s.widget.faces.today, day.MinTempC, day.MaxTempC, valueCenterX, centeredTextBaselineY(s.widget.faces.today, float64(rowTop)+(float64(rowHeight)*0.56)), color.RGBA{R: 204, G: 220, B: 235, A: 255})
 	}
-	return stringsUpper(date.Weekday().String()[:3])
 }
 
 func valueOrDash(value string) string {
@@ -501,6 +550,14 @@ func valueOrDash(value string) string {
 		return "--"
 	}
 	return value
+}
+
+func drawWeatherIcon(dst *image.RGBA, src image.Image, rect image.Rectangle) {
+	if src == nil {
+		return
+	}
+
+	xdraw.CatmullRom.Scale(dst, rect, src, src.Bounds(), xdraw.Over, nil)
 }
 
 func drawSuperscriptTemperature(dst *image.RGBA, face font.Face, value string, centerX float64, baselineY float64, c color.RGBA) {

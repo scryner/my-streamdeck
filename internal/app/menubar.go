@@ -16,7 +16,9 @@ func RunMenuBar() error {
 	)
 
 	systray.Run(func() {
-		systray.SetTitle("my-streamdeck")
+		icon := menuBarIcon()
+		systray.SetTemplateIcon(icon, icon)
+		systray.SetTitle("")
 		systray.SetTooltip("my-streamdeck")
 
 		rt, err := StartRuntime()

@@ -45,10 +45,11 @@ type quiSource struct {
 	fetch      QuiFetchFunc
 	faces      quiFaces
 
-	mu        sync.RWMutex
-	lastFetch time.Time
-	cached    quiSnapshot
-	hasData   bool
+	mu         sync.RWMutex
+	lastFetch  time.Time
+	cached     quiSnapshot
+	hasData    bool
+	signalLost bool
 }
 
 type quiFaces struct {
@@ -145,11 +146,13 @@ func (s *quiSource) FrameAt(ctx context.Context, _ time.Duration) (image.Image, 
 		if err == nil {
 			s.storeSnapshot(fresh)
 			snapshot = fresh
+		} else {
+			s.markSignalLost()
 		}
 	}
 
 	img := image.NewRGBA(image.Rect(0, 0, s.size, s.size))
-	s.render(img, snapshot, s.hasSnapshot())
+	s.render(img, snapshot, s.hasSnapshot(), s.isSignalLost())
 	return img, nil
 }
 
@@ -166,6 +169,7 @@ func (s *quiSource) Close() error {
 	s.cached = quiSnapshot{}
 	s.hasData = false
 	s.lastFetch = time.Time{}
+	s.signalLost = false
 	s.mu.Unlock()
 
 	return closeFaces(s.faces.header, s.faces.row)
@@ -195,6 +199,20 @@ func (s *quiSource) storeSnapshot(snapshot quiSnapshot) {
 	s.cached = snapshot
 	s.hasData = true
 	s.lastFetch = time.Now()
+	s.signalLost = false
+}
+
+func (s *quiSource) markSignalLost() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastFetch = time.Now()
+	s.signalLost = true
+}
+
+func (s *quiSource) isSignalLost() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.signalLost
 }
 
 func (s *quiSource) fetchSnapshot(ctx context.Context, baseURL string, apiKey string) (quiSnapshot, error) {
@@ -283,8 +301,13 @@ func loadQuiFaces(size int) (quiFaces, error) {
 	}, nil
 }
 
-func (s *quiSource) render(dst *image.RGBA, snapshot quiSnapshot, hasData bool) {
+func (s *quiSource) render(dst *image.RGBA, snapshot quiSnapshot, hasData bool, signalLost bool) {
 	fillSolid(dst, color.RGBA{R: 15, G: 17, B: 20, A: 255})
+
+	if signalLost {
+		drawCenteredText(dst, s.faces.row, "NO SIGNAL", float64(s.size)/2, centeredTextBaselineY(s.faces.row, float64(s.size)/2), color.RGBA{R: 244, G: 246, B: 248, A: 255})
+		return
+	}
 
 	rowHeight := float64(s.size) / 4
 	for i := 1; i < 4; i++ {

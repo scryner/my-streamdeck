@@ -2,6 +2,7 @@ package widgets
 
 import (
 	"context"
+	"fmt"
 	"image"
 	"net/http"
 	"net/http/httptest"
@@ -98,5 +99,41 @@ func TestQuiWidgetRendersExpectedBounds(t *testing.T) {
 	}
 	if visiblePixels == 0 {
 		t.Fatal("expected qui widget to render visible content")
+	}
+}
+
+func TestQuiWidgetShowsNoSignalOnFetchFailure(t *testing.T) {
+	t.Parallel()
+
+	widget, err := NewQuiWidget(QuiWidgetOptions{
+		Key:     streamdeck.KEY_8,
+		Size:    DefaultClockWidgetSize,
+		BaseURL: "https://example.test",
+		APIKey:  "test-key",
+		Fetch: func(context.Context, string, string) (quiSnapshot, error) {
+			return quiSnapshot{}, fmt.Errorf("dial error")
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewQuiWidget: %v", err)
+	}
+
+	frame, err := widget.Button().Animation.Source.FrameAt(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("FrameAt: %v", err)
+	}
+
+	center := DefaultClockWidgetSize / 2
+	visiblePixels := 0
+	for y := center - 12; y <= center+12; y++ {
+		for x := center - 50; x <= center+50; x++ {
+			r, g, b, _ := frame.At(x, y).RGBA()
+			if maxUint32(r, g, b) > 0x6000 {
+				visiblePixels++
+			}
+		}
+	}
+	if visiblePixels == 0 {
+		t.Fatal("expected no signal message to render near center")
 	}
 }

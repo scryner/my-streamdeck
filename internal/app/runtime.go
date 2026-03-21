@@ -14,12 +14,20 @@ import (
 )
 
 type Runtime struct {
-	device     *streamdeck.Device
-	controller *deckbutton.Controller
-	stopCh     chan struct{}
-	doneCh     chan struct{}
-	closeOnce  sync.Once
+	device           *streamdeck.Device
+	controller       *deckbutton.Controller
+	stopCh           chan struct{}
+	doneCh           chan struct{}
+	unexpectedStopCh chan error
+	closeOnce        sync.Once
 }
+
+const (
+	runtimeDeviceOpenAttempts      = 20
+	runtimeDeviceOpenRetryInterval = 250 * time.Millisecond
+	runtimeDisplayWakeDelay        = 150 * time.Millisecond
+	runtimeBrightnessPercent       = 100
+)
 
 func StartRuntime() (*Runtime, error) {
 	cfg, exists, err := LoadConfig()
@@ -29,13 +37,15 @@ func StartRuntime() (*Runtime, error) {
 		exists = false
 	}
 
-	device, err := streamdeck.GetDevice("")
+	device, err := openFreshDevice()
 	if err != nil {
 		return nil, err
 	}
-	if err := device.Open(); err != nil {
-		return nil, err
+	if err := device.SetBrightness(runtimeBrightnessPercent); err != nil {
+		_ = device.Close()
+		return nil, fmt.Errorf("set stream deck brightness: %w", err)
 	}
+	time.Sleep(runtimeDisplayWakeDelay)
 
 	buttons, usedKeys, err := buildButtons(cfg, exists, int(device.GetKeyCount()))
 	if err != nil {
@@ -56,22 +66,45 @@ func StartRuntime() (*Runtime, error) {
 	}
 
 	rt := &Runtime{
-		device:     device,
-		controller: controller,
-		stopCh:     make(chan struct{}),
-		doneCh:     make(chan struct{}),
+		device:           device,
+		controller:       controller,
+		stopCh:           make(chan struct{}),
+		doneCh:           make(chan struct{}),
+		unexpectedStopCh: make(chan error, 1),
 	}
 	go rt.listen()
 	return rt, nil
 }
 
+func openFreshDevice() (*streamdeck.Device, error) {
+	var lastErr error
+	for attempt := 0; attempt < runtimeDeviceOpenAttempts; attempt++ {
+		device, err := streamdeck.GetDevice("")
+		if err == nil {
+			err = device.Open()
+		}
+		if err == nil {
+			return device, nil
+		}
+		lastErr = err
+		time.Sleep(runtimeDeviceOpenRetryInterval)
+	}
+
+	return nil, fmt.Errorf("reopen stream deck after reset: %w", lastErr)
+}
+
 func (r *Runtime) listen() {
 	defer close(r.doneCh)
+	defer close(r.unexpectedStopCh)
 	if err := r.device.Listen(nil); err != nil {
 		select {
 		case <-r.stopCh:
 			return
 		default:
+			select {
+			case r.unexpectedStopCh <- err:
+			default:
+			}
 			log.Printf("stream deck listener stopped: %v", err)
 		}
 	}
@@ -94,6 +127,10 @@ func (r *Runtime) Close() {
 		case <-time.After(200 * time.Millisecond):
 		}
 	})
+}
+
+func (r *Runtime) UnexpectedStop() <-chan error {
+	return r.unexpectedStopCh
 }
 
 func buildButtons(cfg Config, configExists bool, maxKeys int) ([]deckbutton.Button, map[streamdeck.KeyID]struct{}, error) {

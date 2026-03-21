@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,7 @@ import (
 const quiWidgetUpdateInterval = time.Minute
 
 type QuiFetchFunc func(ctx context.Context, baseURL string, apiKey string) (quiSnapshot, error)
+type QuiOpenFunc func(ctx context.Context, url string) error
 
 type QuiWidgetOptions struct {
 	Key        streamdeck.KeyID
@@ -29,12 +31,15 @@ type QuiWidgetOptions struct {
 	BaseURL    string
 	APIKey     string
 	Fetch      QuiFetchFunc
+	Open       QuiOpenFunc
 	HTTPClient *http.Client
 }
 
 type QuiWidget struct {
-	key    streamdeck.KeyID
-	source *quiSource
+	key     streamdeck.KeyID
+	baseURL string
+	open    QuiOpenFunc
+	source  *quiSource
 }
 
 type quiSource struct {
@@ -113,20 +118,40 @@ func NewQuiWidget(options QuiWidgetOptions) (*QuiWidget, error) {
 	}
 
 	return &QuiWidget{
-		key:    options.Key,
-		source: source,
+		key:     options.Key,
+		baseURL: source.baseURL,
+		open:    resolveQuiOpenFunc(options.Open),
+		source:  source,
 	}, nil
 }
 
 func (w *QuiWidget) Button() deckbutton.Button {
 	return deckbutton.Button{
 		Key: w.key,
+		OnPress: func(_ *streamdeck.Device, _ *streamdeck.Key) error {
+			return w.open(context.Background(), w.baseURL+"/instances")
+		},
 		Animation: &deckbutton.Animation{
 			Source:         w.source,
 			UpdateInterval: quiWidgetUpdateInterval,
 			Loop:           true,
 		},
 	}
+}
+
+func resolveQuiOpenFunc(fn QuiOpenFunc) QuiOpenFunc {
+	if fn != nil {
+		return fn
+	}
+	return openQuiURL
+}
+
+func openQuiURL(ctx context.Context, url string) error {
+	cmd := exec.CommandContext(ctx, "/usr/bin/open", url)
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("open qui url: %w", err)
+	}
+	return nil
 }
 
 func (s *quiSource) Start(context.Context) error {

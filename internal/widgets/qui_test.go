@@ -60,6 +60,39 @@ func TestQuiFetchSnapshotAggregatesActiveInstances(t *testing.T) {
 	}
 }
 
+func TestQuiWidgetButtonOpensInstancesPage(t *testing.T) {
+	t.Parallel()
+
+	var opened string
+	widget, err := NewQuiWidget(QuiWidgetOptions{
+		Key:     streamdeck.KEY_8,
+		Size:    DefaultClockWidgetSize,
+		BaseURL: "https://example.test/",
+		APIKey:  "test-key",
+		Open: func(_ context.Context, url string) error {
+			opened = url
+			return nil
+		},
+		Fetch: func(context.Context, string, string) (quiSnapshot, error) {
+			return quiSnapshot{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewQuiWidget: %v", err)
+	}
+
+	button := widget.Button()
+	if button.OnPress == nil {
+		t.Fatal("expected qui button to define OnPress handler")
+	}
+	if err := button.OnPress(nil, nil); err != nil {
+		t.Fatalf("OnPress: %v", err)
+	}
+	if opened != "https://example.test/instances" {
+		t.Fatalf("unexpected opened url: %q", opened)
+	}
+}
+
 func TestQuiWidgetRendersExpectedBounds(t *testing.T) {
 	t.Parallel()
 

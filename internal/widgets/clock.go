@@ -109,8 +109,9 @@ type clockSource struct {
 	now      func() time.Time
 	faces    clockFaces
 
-	mu   sync.RWMutex
-	mode ClockMode
+	mu       sync.RWMutex
+	renderMu sync.Mutex
+	mode     ClockMode
 }
 
 type clockFaces struct {
@@ -144,6 +145,9 @@ func (s *clockSource) FrameAt(ctx context.Context, _ time.Duration) (image.Image
 		return nil, ctx.Err()
 	default:
 	}
+
+	s.renderMu.Lock()
+	defer s.renderMu.Unlock()
 
 	now := s.now().In(s.location)
 	mode := s.Mode()

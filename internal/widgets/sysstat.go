@@ -6,7 +6,6 @@ import (
 	"image"
 	"image/color"
 	"math"
-	"sync"
 	"time"
 
 	"github.com/scryner/my-streamdeck/internal/deckbutton"
@@ -41,11 +40,6 @@ type sysstatSource struct {
 type sysstatFaces struct {
 	value font.Face
 }
-
-var (
-	sysstatFacesMu    sync.Mutex
-	sysstatFacesCache = map[int]sysstatFaces{}
-)
 
 func NewSysstatWidget(options SysstatWidgetOptions) (*SysstatWidget, error) {
 	if options.Size <= 0 {
@@ -156,22 +150,13 @@ func (s *sysstatSource) renderUsageRow(dst *image.RGBA, centerY float64, percent
 }
 
 func loadSysstatFaces(size int) (sysstatFaces, error) {
-	sysstatFacesMu.Lock()
-	defer sysstatFacesMu.Unlock()
-
-	if faces, ok := sysstatFacesCache[size]; ok {
-		return faces, nil
-	}
-
 	scale := float64(size) / 72.0
 	value, err := newFace(gobold.TTF, 15*scale)
 	if err != nil {
 		return sysstatFaces{}, fmt.Errorf("load sysstat value font: %w", err)
 	}
 
-	faces := sysstatFaces{value: value}
-	sysstatFacesCache[size] = faces
-	return faces, nil
+	return sysstatFaces{value: value}, nil
 }
 
 func clampUsage(value float64) float64 {

@@ -59,11 +59,6 @@ const (
 	bandwidthDirectionIn
 )
 
-var (
-	netstatFacesMu    sync.Mutex
-	netstatFacesCache = map[int]netstatFaces{}
-)
-
 func NewNetstatWidget(options NetstatWidgetOptions) (*NetstatWidget, error) {
 	if options.Size <= 0 {
 		options.Size = DefaultClockWidgetSize
@@ -234,13 +229,6 @@ func (s *netstatSource) renderBandwidthRow(dst *image.RGBA, centerY float64, dir
 }
 
 func loadNetstatFaces(size int) (netstatFaces, error) {
-	netstatFacesMu.Lock()
-	defer netstatFacesMu.Unlock()
-
-	if faces, ok := netstatFacesCache[size]; ok {
-		return faces, nil
-	}
-
 	scale := float64(size) / 72.0
 	value, err := newFace(gobold.TTF, 9.5*scale)
 	if err != nil {
@@ -251,12 +239,10 @@ func loadNetstatFaces(size int) (netstatFaces, error) {
 		return netstatFaces{}, fmt.Errorf("load netstat interface font: %w", err)
 	}
 
-	faces := netstatFaces{
+	return netstatFaces{
 		value: value,
 		iface: iface,
-	}
-	netstatFacesCache[size] = faces
-	return faces, nil
+	}, nil
 }
 
 func formatBandwidth(bytesPerSecond float64) string {

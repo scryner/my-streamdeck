@@ -39,14 +39,16 @@ type WeatherWidgetOptions struct {
 }
 
 type WeatherWidget struct {
-	location   string
-	size       int
-	fetch      WeatherFetchFunc
-	now        func() time.Time
-	httpClient *http.Client
-	faces      weatherFaces
+	location      string
+	size          int
+	fetch         WeatherFetchFunc
+	now           func() time.Time
+	httpClient    *http.Client
+	todayFaces    weatherFaces
+	forecastFaces weatherFaces
 
 	startOnce sync.Once
+	renderMu  sync.Mutex
 
 	stateMu sync.RWMutex
 	cached  weatherSnapshot
@@ -66,6 +68,7 @@ type WeatherForecastWidget struct {
 type weatherViewSource struct {
 	widget *WeatherWidget
 	view   weatherViewKind
+	faces  weatherFaces
 }
 
 type weatherViewKind int
@@ -128,11 +131,6 @@ type wttrResponse struct {
 	} `json:"weather"`
 }
 
-var (
-	weatherFacesMu    sync.Mutex
-	weatherFacesCache = map[int]weatherFaces{}
-)
-
 func NewWeatherWidget(options WeatherWidgetOptions) (*WeatherWidget, error) {
 	if options.Location == "" {
 		return nil, fmt.Errorf("weather location is required")
@@ -147,17 +145,22 @@ func NewWeatherWidget(options WeatherWidgetOptions) (*WeatherWidget, error) {
 		options.HTTPClient = &http.Client{Timeout: 10 * time.Second}
 	}
 
-	faces, err := loadWeatherFaces(options.Size)
+	todayFaces, err := loadWeatherFaces(options.Size)
+	if err != nil {
+		return nil, err
+	}
+	forecastFaces, err := loadWeatherFaces(options.Size)
 	if err != nil {
 		return nil, err
 	}
 
 	widget := &WeatherWidget{
-		location:   options.Location,
-		size:       options.Size,
-		now:        options.Now,
-		httpClient: options.HTTPClient,
-		faces:      faces,
+		location:      options.Location,
+		size:          options.Size,
+		now:           options.Now,
+		httpClient:    options.HTTPClient,
+		todayFaces:    todayFaces,
+		forecastFaces: forecastFaces,
 	}
 	if options.Fetch != nil {
 		widget.fetch = options.Fetch
@@ -174,6 +177,7 @@ func (w *WeatherWidget) Today(key streamdeck.KeyID) *WeatherTodayWidget {
 		source: &weatherViewSource{
 			widget: w,
 			view:   weatherViewToday,
+			faces:  w.todayFaces,
 		},
 	}
 }
@@ -184,6 +188,7 @@ func (w *WeatherWidget) Forecast(key streamdeck.KeyID) *WeatherForecastWidget {
 		source: &weatherViewSource{
 			widget: w,
 			view:   weatherViewForecast,
+			faces:  w.forecastFaces,
 		},
 	}
 }
@@ -220,6 +225,9 @@ func (s *weatherViewSource) FrameAt(ctx context.Context, _ time.Duration) (image
 		return nil, ctx.Err()
 	default:
 	}
+
+	s.widget.renderMu.Lock()
+	defer s.widget.renderMu.Unlock()
 
 	img := image.NewRGBA(image.Rect(0, 0, s.widget.size, s.widget.size))
 	snapshot, ok := s.widget.currentSnapshot()
@@ -457,13 +465,6 @@ func cleanWeatherText(text string, limit int) string {
 }
 
 func loadWeatherFaces(size int) (weatherFaces, error) {
-	weatherFacesMu.Lock()
-	defer weatherFacesMu.Unlock()
-
-	if faces, ok := weatherFacesCache[size]; ok {
-		return faces, nil
-	}
-
 	scale := float64(size) / 72.0
 	today, err := newFace(gobold.TTF, 9.5*scale)
 	if err != nil {
@@ -486,19 +487,17 @@ func loadWeatherFaces(size int) (weatherFaces, error) {
 		return weatherFaces{}, fmt.Errorf("load weather forecast detail font: %w", err)
 	}
 
-	faces := weatherFaces{
+	return weatherFaces{
 		todayDetail:    todayDetail,
 		todayTemp:      todayTemp,
 		today:          today,
 		forecastMain:   forecastMain,
 		forecastDetail: forecastDetail,
-	}
-	weatherFacesCache[size] = faces
-	return faces, nil
+	}, nil
 }
 
 func (s *weatherViewSource) renderLoading(dst *image.RGBA) {
-	drawCenteredText(dst, s.widget.faces.today, "Loading", float64(s.widget.size)/2, centeredTextBaselineY(s.widget.faces.today, float64(s.widget.size)*0.48), color.RGBA{R: 244, G: 246, B: 248, A: 255})
+	drawCenteredText(dst, s.faces.today, "Loading", float64(s.widget.size)/2, centeredTextBaselineY(s.faces.today, float64(s.widget.size)*0.48), color.RGBA{R: 244, G: 246, B: 248, A: 255})
 }
 
 func (s *weatherViewSource) renderToday(dst *image.RGBA, snapshot weatherSnapshot) {
@@ -509,14 +508,14 @@ func (s *weatherViewSource) renderToday(dst *image.RGBA, snapshot weatherSnapsho
 		todayRange = snapshot.Days[0]
 	}
 
-	drawCenteredText(dst, s.widget.faces.todayDetail, snapshot.Current.Condition, centerX, centeredTextBaselineY(s.widget.faces.todayDetail, rowHeight*0.58), color.RGBA{R: 116, G: 236, B: 255, A: 255})
-	drawSuperscriptTemperature(dst, s.widget.faces.todayTemp, snapshot.Current.TempC, centerX, centeredTextBaselineY(s.widget.faces.todayTemp, rowHeight*1.46), color.RGBA{R: 247, G: 248, B: 250, A: 255})
+	drawCenteredText(dst, s.faces.todayDetail, snapshot.Current.Condition, centerX, centeredTextBaselineY(s.faces.todayDetail, rowHeight*0.58), color.RGBA{R: 116, G: 236, B: 255, A: 255})
+	drawSuperscriptTemperature(dst, s.faces.todayTemp, snapshot.Current.TempC, centerX, centeredTextBaselineY(s.faces.todayTemp, rowHeight*1.46), color.RGBA{R: 247, G: 248, B: 250, A: 255})
 	lineY := int(rowHeight * 2)
 	for x := range s.widget.size {
 		dst.SetRGBA(x, lineY, color.RGBA{R: 88, G: 101, B: 118, A: 255})
 	}
-	drawTemperatureRange(dst, s.widget.faces.today, todayRange.MinTempC, todayRange.MaxTempC, centerX, centeredTextBaselineY(s.widget.faces.today, rowHeight*2.56), color.RGBA{R: 204, G: 220, B: 235, A: 255})
-	drawCenteredText(dst, s.widget.faces.today, "UV "+valueOrDash(snapshot.Current.UVIndex), centerX, centeredTextBaselineY(s.widget.faces.today, rowHeight*3.42), color.RGBA{R: 255, G: 212, B: 109, A: 255})
+	drawTemperatureRange(dst, s.faces.today, todayRange.MinTempC, todayRange.MaxTempC, centerX, centeredTextBaselineY(s.faces.today, rowHeight*2.56), color.RGBA{R: 204, G: 220, B: 235, A: 255})
+	drawCenteredText(dst, s.faces.today, "UV "+valueOrDash(snapshot.Current.UVIndex), centerX, centeredTextBaselineY(s.faces.today, rowHeight*3.42), color.RGBA{R: 255, G: 212, B: 109, A: 255})
 }
 
 func (s *weatherViewSource) renderForecast(dst *image.RGBA, snapshot weatherSnapshot) {
@@ -540,7 +539,7 @@ func (s *weatherViewSource) renderForecast(dst *image.RGBA, snapshot weatherSnap
 		drawWeatherIcon(dst, day.Icon, iconRect)
 
 		valueCenterX := float64(iconColumnWidth) + (float64(s.widget.size-iconColumnWidth) / 2)
-		drawTemperatureRange(dst, s.widget.faces.today, day.MinTempC, day.MaxTempC, valueCenterX, centeredTextBaselineY(s.widget.faces.today, float64(rowTop)+(float64(rowHeight)*0.56)), color.RGBA{R: 204, G: 220, B: 235, A: 255})
+		drawTemperatureRange(dst, s.faces.today, day.MinTempC, day.MaxTempC, valueCenterX, centeredTextBaselineY(s.faces.today, float64(rowTop)+(float64(rowHeight)*0.56)), color.RGBA{R: 204, G: 220, B: 235, A: 255})
 	}
 }
 

@@ -43,9 +43,13 @@ func TestCaffeinateWidgetToggleAndSleep(t *testing.T) {
 	t.Parallel()
 
 	backend := &fakeCaffeinateBackend{}
+	now := time.Date(2026, time.March, 21, 12, 0, 0, 0, time.UTC)
 	widget, err := NewCaffeinateWidget(CaffeinateWidgetOptions{
 		Key:     streamdeck.KEY_7,
 		Backend: backend,
+		Now: func() time.Time {
+			return now
+		},
 	})
 	if err != nil {
 		t.Fatalf("NewCaffeinateWidget: %v", err)
@@ -57,6 +61,9 @@ func TestCaffeinateWidgetToggleAndSleep(t *testing.T) {
 	if !backend.enabled || backend.enableCalls != 1 {
 		t.Fatalf("expected caffeinate to be enabled once, got %+v", backend)
 	}
+	if enabledAt, ok := widget.source.enabledSince(); !ok || !enabledAt.Equal(now) {
+		t.Fatalf("expected widget to track enable time %s, got %v (ok=%v)", now, enabledAt, ok)
+	}
 
 	if err := widget.toggle(); err != nil {
 		t.Fatalf("toggle off: %v", err)
@@ -64,7 +71,11 @@ func TestCaffeinateWidgetToggleAndSleep(t *testing.T) {
 	if backend.enabled || backend.disableCalls != 1 {
 		t.Fatalf("expected caffeinate to be disabled once, got %+v", backend)
 	}
+	if _, ok := widget.source.enabledSince(); ok {
+		t.Fatal("expected widget to clear enable time when toggled off")
+	}
 
+	now = now.Add(90 * time.Second)
 	if err := widget.toggle(); err != nil {
 		t.Fatalf("toggle on again: %v", err)
 	}
@@ -76,6 +87,9 @@ func TestCaffeinateWidgetToggleAndSleep(t *testing.T) {
 	}
 	if backend.disableCalls != 2 || backend.sleepCalls != 1 {
 		t.Fatalf("unexpected backend calls after sleep: %+v", backend)
+	}
+	if _, ok := widget.source.enabledSince(); ok {
+		t.Fatal("expected widget to clear enable time before sleep")
 	}
 }
 
@@ -174,5 +188,19 @@ func TestCaffeinateWidgetRendersExpectedBounds(t *testing.T) {
 	}
 	if !reflect.DeepEqual(frame.Bounds(), image.Rect(0, 0, DefaultClockWidgetSize, DefaultClockWidgetSize)) {
 		t.Fatalf("unexpected caffeinate bounds: %v", frame.Bounds())
+	}
+}
+
+func TestCaffeinateElapsedParts(t *testing.T) {
+	t.Parallel()
+
+	minutes, seconds := caffeinateElapsedParts(123*time.Minute + 55*time.Second)
+	if minutes != "123" || seconds != "55" {
+		t.Fatalf("expected elapsed parts 123 and 55, got %q and %q", minutes, seconds)
+	}
+
+	minutes, seconds = caffeinateElapsedParts(-5 * time.Second)
+	if minutes != "0" || seconds != "00" {
+		t.Fatalf("expected negative durations to clamp to zero, got %q and %q", minutes, seconds)
 	}
 }

@@ -6,7 +6,6 @@ import (
 	"image"
 	"image/color"
 	"os/exec"
-	"sync"
 	"time"
 
 	"github.com/scryner/my-streamdeck/internal/deckbutton"
@@ -42,11 +41,6 @@ type calendarFaces struct {
 	header font.Face
 	day    font.Face
 }
-
-var (
-	calendarFacesMu    sync.Mutex
-	calendarFacesCache = map[int]calendarFaces{}
-)
 
 func NewCalendarWidget(options CalendarWidgetOptions) (*CalendarWidget, error) {
 	if options.Size <= 0 {
@@ -152,13 +146,6 @@ func centeredTextBaselineY(face font.Face, centerY float64) float64 {
 }
 
 func loadCalendarFaces(size int) (calendarFaces, error) {
-	calendarFacesMu.Lock()
-	defer calendarFacesMu.Unlock()
-
-	if faces, ok := calendarFacesCache[size]; ok {
-		return faces, nil
-	}
-
 	scale := float64(size) / 72.0
 	header, err := newFace(gobold.TTF, 10*scale)
 	if err != nil {
@@ -169,10 +156,8 @@ func loadCalendarFaces(size int) (calendarFaces, error) {
 		return calendarFaces{}, fmt.Errorf("load calendar day font: %w", err)
 	}
 
-	faces := calendarFaces{
+	return calendarFaces{
 		header: header,
 		day:    day,
-	}
-	calendarFacesCache[size] = faces
-	return faces, nil
+	}, nil
 }

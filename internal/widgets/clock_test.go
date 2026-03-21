@@ -4,6 +4,7 @@ import (
 	"context"
 	"image"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -73,6 +74,39 @@ func TestClockWidgetToggleChangesRenderedFrame(t *testing.T) {
 	if imagesEqual(analog, digital) {
 		t.Fatal("expected analog and digital frames to differ")
 	}
+}
+
+func TestClockWidgetFrameAtConcurrent(t *testing.T) {
+	t.Parallel()
+
+	widget, err := NewClockWidget(ClockWidgetOptions{
+		Key: streamdeck.KEY_1,
+		Now: func() time.Time { return time.Date(2026, time.March, 20, 10, 15, 30, 250_000_000, time.UTC) },
+	})
+	if err != nil {
+		t.Fatalf("NewClockWidget: %v", err)
+	}
+
+	button := widget.Button()
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 25 {
+				frame, err := button.Animation.Source.FrameAt(context.Background(), 0)
+				if err != nil {
+					t.Errorf("FrameAt: %v", err)
+					return
+				}
+				if !frame.Bounds().Eq(image.Rect(0, 0, DefaultClockWidgetSize, DefaultClockWidgetSize)) {
+					t.Errorf("unexpected bounds: %v", frame.Bounds())
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func imagesEqual(a, b image.Image) bool {

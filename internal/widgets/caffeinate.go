@@ -13,7 +13,6 @@ import (
 	"github.com/scryner/my-streamdeck/internal/deckbutton"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/gofont/gobold"
-	"golang.org/x/image/font/gofont/gomono"
 	"rafaelmartins.com/p/streamdeck"
 )
 
@@ -55,23 +54,19 @@ type caffeinateSource struct {
 	pressToken uint64
 	pressed    bool
 	pressStart time.Time
+	enabledAt  time.Time
 }
 
 type caffeinateFaces struct {
 	title  font.Face
+	timer  font.Face
 	status font.Face
-	hint   font.Face
 }
 
 type commandCaffeinateBackend struct {
 	mu  sync.Mutex
 	cmd *exec.Cmd
 }
-
-var (
-	caffeinateFacesMu    sync.Mutex
-	caffeinateFacesCache = map[int]caffeinateFaces{}
-)
 
 func NewCaffeinateWidget(options CaffeinateWidgetOptions) (*CaffeinateWidget, error) {
 	if options.Size <= 0 {
@@ -94,10 +89,11 @@ func NewCaffeinateWidget(options CaffeinateWidgetOptions) (*CaffeinateWidget, er
 		now:     options.Now,
 		backend: options.Backend,
 		source: &caffeinateSource{
-			size:  options.Size,
-			now:   options.Now,
-			state: options.Backend,
-			faces: faces,
+			size:      options.Size,
+			now:       options.Now,
+			state:     options.Backend,
+			faces:     faces,
+			enabledAt: initialEnabledAt(options.Backend, options.Now),
 		},
 	}, nil
 }
@@ -164,9 +160,17 @@ func (w *CaffeinateWidget) handlePress(k *streamdeck.Key) error {
 
 func (w *CaffeinateWidget) toggle() error {
 	if w.backend.Enabled() {
-		return w.backend.Disable()
+		if err := w.backend.Disable(); err != nil {
+			return err
+		}
+		w.source.markDisabled()
+		return nil
 	}
-	return w.backend.Enable()
+	if err := w.backend.Enable(); err != nil {
+		return err
+	}
+	w.source.markEnabled(w.now())
+	return nil
 }
 
 func (w *CaffeinateWidget) sleepNow() error {
@@ -174,6 +178,7 @@ func (w *CaffeinateWidget) sleepNow() error {
 		if err := w.backend.Disable(); err != nil {
 			return err
 		}
+		w.source.markDisabled()
 	}
 	return w.backend.Sleep()
 }
@@ -236,6 +241,27 @@ func (s *caffeinateSource) endPress(token uint64) {
 	s.pressed = false
 }
 
+func (s *caffeinateSource) markEnabled(now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.enabledAt = now
+}
+
+func (s *caffeinateSource) markDisabled() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.enabledAt = time.Time{}
+}
+
+func (s *caffeinateSource) enabledSince() (time.Time, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.enabledAt.IsZero() {
+		return time.Time{}, false
+	}
+	return s.enabledAt, true
+}
+
 func (s *caffeinateSource) holdProgress(now time.Time) float64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -268,7 +294,8 @@ func (s *caffeinateSource) fillTriggerDuration() time.Duration {
 }
 
 func (s *caffeinateSource) render(dst *image.RGBA) {
-	progress := s.holdProgress(s.now())
+	now := s.now()
+	progress := s.holdProgress(now)
 	displayProgress := easeOutProgress(progress)
 	isEnabled := false
 	if s.state != nil {
@@ -282,14 +309,25 @@ func (s *caffeinateSource) render(dst *image.RGBA) {
 	}
 
 	centerX := float64(s.size) / 2
-	drawCenteredText(dst, s.faces.title, "CAFFEINATE", centerX, centeredTextBaselineY(s.faces.title, float64(s.size)*0.24), color.RGBA{R: 227, G: 231, B: 236, A: 255})
+	rowGapOffset := float64(scaledValue(s.size, 5))
+	headerCenterY := float64(s.size)*0.32 - rowGapOffset
+	statusCenterY := float64(s.size)*0.53 + rowGapOffset
+	headerColor := color.RGBA{R: 227, G: 231, B: 236, A: 255}
 	status := "OFF"
 	statusColor := color.RGBA{R: 171, G: 178, B: 186, A: 255}
 	if isEnabled {
+		headerColor = color.RGBA{R: 233, G: 237, B: 242, A: 255}
+		if enabledAt, ok := s.enabledSince(); ok {
+			drawCaffeinateElapsedTimer(dst, s.faces.timer, now.Sub(enabledAt), centerX, headerCenterY, headerColor)
+		} else {
+			drawCenteredText(dst, s.faces.title, "CAFFEINATE", centerX, centeredTextBaselineY(s.faces.title, headerCenterY), headerColor)
+		}
 		status = "ON"
 		statusColor = color.RGBA{R: 105, G: 233, B: 137, A: 255}
+	} else {
+		drawCenteredText(dst, s.faces.title, "CAFFEINATE", centerX, centeredTextBaselineY(s.faces.title, headerCenterY), headerColor)
 	}
-	drawCenteredText(dst, s.faces.status, status, centerX, centeredTextBaselineY(s.faces.status, float64(s.size)*0.53), statusColor)
+	drawCenteredText(dst, s.faces.status, status, centerX, centeredTextBaselineY(s.faces.status, statusCenterY), statusColor)
 }
 
 func easeOutProgress(progress float64) float64 {
@@ -321,35 +359,152 @@ func shouldToggleOnRelease(duration time.Duration) bool {
 	return duration <= caffeinateTapDuration
 }
 
-func loadCaffeinateFaces(size int) (caffeinateFaces, error) {
-	caffeinateFacesMu.Lock()
-	defer caffeinateFacesMu.Unlock()
+func initialEnabledAt(backend CaffeinateBackend, now func() time.Time) time.Time {
+	if backend == nil || !backend.Enabled() {
+		return time.Time{}
+	}
+	return now()
+}
 
-	if faces, ok := caffeinateFacesCache[size]; ok {
-		return faces, nil
+func caffeinateElapsedParts(elapsed time.Duration) (string, string) {
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	totalSeconds := int(elapsed / time.Second)
+	minutes := totalSeconds / 60
+	seconds := totalSeconds % 60
+	return fmt.Sprintf("%d", minutes), fmt.Sprintf("%02d", seconds)
+}
+
+func drawCaffeinateElapsedTimer(dst *image.RGBA, face font.Face, elapsed time.Duration, centerX, centerY float64, c color.RGBA) {
+	minutes, seconds := caffeinateElapsedParts(elapsed)
+	minutesWidth := measureTextWidth(face, minutes)
+	colonWidth := measureTextWidth(face, ":")
+	secondsWidth := measureTextWidth(face, seconds)
+	startX := centerX - ((minutesWidth + colonWidth + secondsWidth) / 2)
+	baselineY := centeredTextBaselineY(face, centerY)
+
+	drawCenteredText(dst, face, minutes, startX+(minutesWidth/2), baselineY, c)
+	drawCenteredText(dst, face, ":", startX+minutesWidth+(colonWidth/2), baselineY, c)
+	drawCenteredText(dst, face, seconds, startX+minutesWidth+colonWidth+(secondsWidth/2), baselineY, c)
+}
+
+func drawCaffeinateCup(dst *image.RGBA, size int, enabled bool) {
+	scale := float64(size) / 144.0
+	iconScale := scale * 0.78
+	stroke := color.RGBA{R: 245, G: 240, B: 232, A: 255}
+	coffee := color.RGBA{R: 212, G: 162, B: 95, A: 255}
+	if !enabled {
+		stroke = color.RGBA{R: 164, G: 171, B: 179, A: 255}
+		coffee = color.RGBA{R: 120, G: 126, B: 132, A: 255}
 	}
 
+	lineWidth := math.Max(2, 2.3*scale)
+	cx := float64(size) * 0.45
+	rimCY := float64(size) * 0.27
+	rimRX := 29 * iconScale
+	rimRY := 7.5 * iconScale
+	bodyBottomY := float64(size) * 0.46
+	bodyTopLeftX := cx - 24*iconScale
+	bodyTopRightX := cx + 24*iconScale
+	bodyBottomLeftX := cx - 18*iconScale
+	bodyBottomRightX := cx + 18*iconScale
+
+	drawEllipseArc(dst, cx, rimCY, rimRX, rimRY, 0, 2*math.Pi, lineWidth, stroke)
+	drawLineWidth(dst, bodyTopLeftX, rimCY+1.5*iconScale, bodyBottomLeftX, bodyBottomY, lineWidth, stroke)
+	drawLineWidth(dst, bodyTopRightX, rimCY+1.5*iconScale, bodyBottomRightX, bodyBottomY, lineWidth, stroke)
+	drawEllipseArc(dst, cx, bodyBottomY, 18*iconScale, 5.5*iconScale, 0.05*math.Pi, 0.95*math.Pi, lineWidth, stroke)
+
+	coffeeCY := rimCY + 2.2*iconScale
+	drawEllipseArc(dst, cx, coffeeCY, 22*iconScale, 4.5*iconScale, 0.15*math.Pi, 0.85*math.Pi, lineWidth*0.9, coffee)
+	for i := range 4 {
+		offset := (-9.0 + float64(i)*6.0) * iconScale
+		drawLineWidth(
+			dst,
+			cx+offset-4*iconScale, coffeeCY+1.8*iconScale,
+			cx+offset+1.5*iconScale, coffeeCY-1.5*iconScale,
+			math.Max(1.2, 1.4*scale),
+			coffee,
+		)
+	}
+
+	handleCX := cx + 31*iconScale
+	handleCY := float64(size) * 0.38
+	drawEllipseArc(dst, handleCX, handleCY, 12*iconScale, 15*iconScale, -0.45*math.Pi, 0.75*math.Pi, lineWidth, stroke)
+	drawEllipseArc(dst, handleCX, handleCY, 6*iconScale, 9*iconScale, -0.3*math.Pi, 0.6*math.Pi, lineWidth, stroke)
+
+	plateCY := float64(size) * 0.58
+	drawEllipseArc(dst, cx, plateCY, 48*iconScale, 12*iconScale, 0, 2*math.Pi, lineWidth, stroke)
+	drawEllipseArc(dst, cx, plateCY-1.8*iconScale, 28*iconScale, 6*iconScale, 0.1*math.Pi, 0.9*math.Pi, math.Max(1.3, 1.5*scale), stroke)
+	drawLineWidth(dst, cx-9*iconScale, bodyBottomY+4*iconScale, cx+9*iconScale, bodyBottomY+4*iconScale, lineWidth, stroke)
+
+	if enabled {
+		drawSteamPlume(dst, cx-15*iconScale, rimCY-2*iconScale, 24*iconScale, math.Max(1.5, 1.7*scale), stroke)
+		drawSteamPlume(dst, cx, rimCY-6*iconScale, 28*iconScale, math.Max(1.5, 1.7*scale), stroke)
+		drawSteamPlume(dst, cx+15*iconScale, rimCY-2*iconScale, 24*iconScale, math.Max(1.5, 1.7*scale), stroke)
+	}
+}
+
+func drawSteamPlume(dst *image.RGBA, x, yBottom, height, width float64, c color.RGBA) {
+	step := height / 4
+	sway := math.Max(2, height/7)
+	drawPolylineWidth(dst, []polygonPoint{
+		{x: x, y: yBottom},
+		{x: x - sway, y: yBottom - step},
+		{x: x + sway*0.45, y: yBottom - 2*step},
+		{x: x - sway*0.35, y: yBottom - 3*step},
+		{x: x + sway*0.8, y: yBottom - 4*step},
+	}, width, c)
+}
+
+func drawPolylineWidth(dst *image.RGBA, points []polygonPoint, width float64, c color.RGBA) {
+	if len(points) < 2 {
+		return
+	}
+	for i := 1; i < len(points); i++ {
+		drawLineWidth(dst, points[i-1].x, points[i-1].y, points[i].x, points[i].y, width, c)
+	}
+}
+
+func drawEllipseArc(dst *image.RGBA, cx, cy, rx, ry, startAngle, endAngle, width float64, c color.RGBA) {
+	if rx <= 0 || ry <= 0 {
+		return
+	}
+	span := math.Abs(endAngle - startAngle)
+	segments := int(math.Max(16, math.Ceil(span*math.Max(rx, ry)/4)))
+	prevX := cx + math.Cos(startAngle)*rx
+	prevY := cy + math.Sin(startAngle)*ry
+	for i := 1; i <= segments; i++ {
+		t := float64(i) / float64(segments)
+		angle := startAngle + (endAngle-startAngle)*t
+		x := cx + math.Cos(angle)*rx
+		y := cy + math.Sin(angle)*ry
+		drawLineWidth(dst, prevX, prevY, x, y, width, c)
+		prevX = x
+		prevY = y
+	}
+}
+
+func loadCaffeinateFaces(size int) (caffeinateFaces, error) {
 	scale := float64(size) / 72.0
 	title, err := newFace(gobold.TTF, 7.5*scale)
 	if err != nil {
 		return caffeinateFaces{}, fmt.Errorf("load caffeinate title font: %w", err)
 	}
+	timer, err := newFace(gobold.TTF, 12.5*scale)
+	if err != nil {
+		return caffeinateFaces{}, fmt.Errorf("load caffeinate timer font: %w", err)
+	}
 	status, err := newFace(gobold.TTF, 18*scale)
 	if err != nil {
 		return caffeinateFaces{}, fmt.Errorf("load caffeinate status font: %w", err)
 	}
-	hint, err := newFace(gomono.TTF, 6.5*scale)
-	if err != nil {
-		return caffeinateFaces{}, fmt.Errorf("load caffeinate hint font: %w", err)
-	}
 
-	faces := caffeinateFaces{
+	return caffeinateFaces{
 		title:  title,
+		timer:  timer,
 		status: status,
-		hint:   hint,
-	}
-	caffeinateFacesCache[size] = faces
-	return faces, nil
+	}, nil
 }
 
 func (b *commandCaffeinateBackend) Enable() error {

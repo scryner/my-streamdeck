@@ -4,11 +4,96 @@ import (
 	"context"
 	"image"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
 	"rafaelmartins.com/p/streamdeck"
 )
+
+func TestWeatherWidgetTodayAndForecastUseDistinctFaces(t *testing.T) {
+	t.Parallel()
+
+	widget, err := NewWeatherWidget(WeatherWidgetOptions{
+		Location: "Seoul",
+	})
+	if err != nil {
+		t.Fatalf("NewWeatherWidget: %v", err)
+	}
+
+	today := widget.Today(streamdeck.KEY_5)
+	forecast := widget.Forecast(streamdeck.KEY_6)
+
+	if sameFace(today.source.faces.today, forecast.source.faces.today) {
+		t.Fatal("expected today and forecast views to use distinct font faces")
+	}
+	if sameFace(today.source.faces.todayTemp, forecast.source.faces.todayTemp) {
+		t.Fatal("expected today and forecast temperature faces to be distinct")
+	}
+}
+
+func TestWeatherWidgetTodayAndForecastRenderConcurrently(t *testing.T) {
+	t.Parallel()
+
+	widget, err := NewWeatherWidget(WeatherWidgetOptions{
+		Location: "Seoul",
+		Fetch: func(context.Context, string) (weatherSnapshot, error) {
+			return weatherSnapshot{
+				Location: "Seoul",
+				Current: weatherCurrent{
+					TempC:     "9",
+					Condition: "Sunny",
+					UVIndex:   "3",
+				},
+				Days: []weatherDay{
+					{Date: time.Date(2026, time.March, 21, 0, 0, 0, 0, time.UTC), MinTempC: "4", MaxTempC: "12", Condition: "Sunny"},
+					{Date: time.Date(2026, time.March, 22, 0, 0, 0, 0, time.UTC), MinTempC: "6", MaxTempC: "14", Condition: "Clear"},
+					{Date: time.Date(2026, time.March, 23, 0, 0, 0, 0, time.UTC), MinTempC: "8", MaxTempC: "16", Condition: "Cloudy"},
+				},
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewWeatherWidget: %v", err)
+	}
+
+	today := widget.Today(streamdeck.KEY_5).Button()
+	forecast := widget.Forecast(streamdeck.KEY_6).Button()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := today.Animation.Source.Start(ctx); err != nil {
+		t.Fatalf("today Start: %v", err)
+	}
+	if err := forecast.Animation.Source.Start(ctx); err != nil {
+		t.Fatalf("forecast Start: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for _, source := range []interface {
+		FrameAt(context.Context, time.Duration) (image.Image, error)
+	}{today.Animation.Source, forecast.Animation.Source} {
+		wg.Add(1)
+		go func(source interface {
+			FrameAt(context.Context, time.Duration) (image.Image, error)
+		}) {
+			defer wg.Done()
+			for range 25 {
+				frame, err := source.FrameAt(context.Background(), 0)
+				if err != nil {
+					t.Errorf("FrameAt: %v", err)
+					return
+				}
+				if !frame.Bounds().Eq(image.Rect(0, 0, DefaultClockWidgetSize, DefaultClockWidgetSize)) {
+					t.Errorf("unexpected bounds: %v", frame.Bounds())
+					return
+				}
+			}
+		}(source)
+	}
+	wg.Wait()
+}
 
 func TestWeatherWidgetTodayAndForecastShareCache(t *testing.T) {
 	t.Parallel()

@@ -281,12 +281,6 @@ func (s *caffeinateSource) render(dst *image.RGBA) {
 		fillRect(dst, 0, fillStartY, s.size, s.size, color.RGBA{R: 255, G: 171, B: 72, A: 255})
 	}
 
-	borderColor := color.RGBA{R: 74, G: 80, B: 86, A: 255}
-	if isEnabled {
-		borderColor = color.RGBA{R: 93, G: 221, B: 126, A: 255}
-	}
-	drawInsetFrame(dst, scaledValue(s.size, 2), borderColor)
-
 	centerX := float64(s.size) / 2
 	drawCenteredText(dst, s.faces.title, "CAFFEINATE", centerX, centeredTextBaselineY(s.faces.title, float64(s.size)*0.24), color.RGBA{R: 227, G: 231, B: 236, A: 255})
 	status := "OFF"
@@ -296,11 +290,6 @@ func (s *caffeinateSource) render(dst *image.RGBA) {
 		statusColor = color.RGBA{R: 105, G: 233, B: 137, A: 255}
 	}
 	drawCenteredText(dst, s.faces.status, status, centerX, centeredTextBaselineY(s.faces.status, float64(s.size)*0.53), statusColor)
-	hint := "HOLD TO SLEEP"
-	if progress > 0 {
-		hint = "RELEASE CANCEL"
-	}
-	drawCenteredText(dst, s.faces.hint, hint, centerX, centeredTextBaselineY(s.faces.hint, float64(s.size)*0.84), color.RGBA{R: 226, G: 234, B: 241, A: 255})
 }
 
 func easeOutProgress(progress float64) float64 {

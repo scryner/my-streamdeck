@@ -128,6 +128,7 @@ const configTemplate = `widgets:
   - type: caffeinate
   - type: qui
 settings:
+  - brightness: "100"
   - weather.location: INPUT-YOUR-WEATHER-LOCATION
   - qui.base_url: INPUT-YOUR-QUI-BASE-URL
   - qui.access_token: INPUT-YOUR-QUI-ACCESS-TOKEN

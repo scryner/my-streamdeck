@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image/color"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,7 +42,8 @@ func StartRuntime() (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := device.SetBrightness(runtimeBrightnessPercent); err != nil {
+	settings := cfg.SettingsMap()
+	if err := device.SetBrightness(resolveBrightness(settings)); err != nil {
 		_ = device.Close()
 		return nil, fmt.Errorf("set stream deck brightness: %w", err)
 	}
@@ -91,6 +93,26 @@ func openFreshDevice() (*streamdeck.Device, error) {
 	}
 
 	return nil, fmt.Errorf("reopen stream deck after reset: %w", lastErr)
+}
+
+func resolveBrightness(settings map[string]string) byte {
+	raw := strings.TrimSpace(settings["brightness"])
+	if raw == "" {
+		return runtimeBrightnessPercent
+	}
+
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		log.Printf("invalid brightness %q, using default %d", raw, runtimeBrightnessPercent)
+		return runtimeBrightnessPercent
+	}
+	if value < 0 {
+		value = 0
+	}
+	if value > 100 {
+		value = 100
+	}
+	return byte(value)
 }
 
 func (r *Runtime) listen() {

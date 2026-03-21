@@ -228,6 +228,9 @@ func (s *caffeinateSource) Duration() time.Duration {
 }
 
 func (s *caffeinateSource) Close() error {
+	if err := closeFaces(s.faces.title, s.faces.timer, s.faces.status); err != nil {
+		return err
+	}
 	if s.state == nil {
 		return nil
 	}

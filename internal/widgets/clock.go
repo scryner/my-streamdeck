@@ -167,7 +167,7 @@ func (s *clockSource) Duration() time.Duration {
 }
 
 func (s *clockSource) Close() error {
-	return nil
+	return closeFaces(s.faces.main, s.faces.small, s.faces.tiny)
 }
 
 func (s *clockSource) ToggleMode() {
@@ -220,6 +220,18 @@ func newFace(ttf []byte, size float64) (font.Face, error) {
 		DPI:     72,
 		Hinting: font.HintingFull,
 	})
+}
+
+func closeFaces(faces ...font.Face) error {
+	for _, face := range faces {
+		if face == nil {
+			continue
+		}
+		if err := face.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *clockSource) renderAnalog(dst *image.RGBA, now time.Time) {

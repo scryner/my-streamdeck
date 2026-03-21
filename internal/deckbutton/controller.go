@@ -53,8 +53,13 @@ type Controller struct {
 	cancel context.CancelFunc
 
 	setImageMu sync.Mutex
-	lastFrame  map[streamdeck.KeyID]image.Image
+	lastFrame  map[streamdeck.KeyID]frameSignature
 	wg         sync.WaitGroup
+}
+
+type frameSignature struct {
+	bounds image.Rectangle
+	sum    uint64
 }
 
 func NewController(device *streamdeck.Device) *Controller {
@@ -63,7 +68,7 @@ func NewController(device *streamdeck.Device) *Controller {
 		device:    device,
 		ctx:       ctx,
 		cancel:    cancel,
-		lastFrame: map[streamdeck.KeyID]image.Image{},
+		lastFrame: map[streamdeck.KeyID]frameSignature{},
 	}
 }
 
@@ -115,6 +120,9 @@ func (c *Controller) RegisterButtons(buttons ...Button) error {
 func (c *Controller) Close() {
 	c.cancel()
 	c.wg.Wait()
+	c.setImageMu.Lock()
+	c.lastFrame = map[streamdeck.KeyID]frameSignature{}
+	c.setImageMu.Unlock()
 }
 
 func (c *Controller) runAnimation(button Button) error {
@@ -223,13 +231,14 @@ func (c *Controller) renderFrame(key streamdeck.KeyID, source FrameSource, elaps
 
 	c.setImageMu.Lock()
 	defer c.setImageMu.Unlock()
-	if prev, ok := c.lastFrame[key]; ok && imagesEqual(prev, img) {
+	sig := imageSignature(img)
+	if prev, ok := c.lastFrame[key]; ok && prev == sig {
 		return nil
 	}
 	if err := c.device.SetKeyImage(key, img); err != nil {
 		return err
 	}
-	c.lastFrame[key] = img
+	c.lastFrame[key] = sig
 	return nil
 }
 
@@ -269,6 +278,34 @@ func imagesEqual(a image.Image, b image.Image) bool {
 		}
 	}
 	return true
+}
+
+func imageSignature(img image.Image) frameSignature {
+	if img == nil {
+		return frameSignature{}
+	}
+
+	sig := frameSignature{
+		bounds: img.Bounds(),
+		sum:    1469598103934665603,
+	}
+
+	for y := sig.bounds.Min.Y; y < sig.bounds.Max.Y; y++ {
+		for x := sig.bounds.Min.X; x < sig.bounds.Max.X; x++ {
+			r, g, b, a := img.At(x, y).RGBA()
+			sig.sum = fnv1a64(sig.sum, uint64(r))
+			sig.sum = fnv1a64(sig.sum, uint64(g))
+			sig.sum = fnv1a64(sig.sum, uint64(b))
+			sig.sum = fnv1a64(sig.sum, uint64(a))
+		}
+	}
+
+	return sig
+}
+
+func fnv1a64(sum uint64, value uint64) uint64 {
+	sum ^= value
+	return sum * 1099511628211
 }
 
 func normalizeFrameTime(elapsed time.Duration, duration time.Duration, loop bool) (time.Duration, bool) {

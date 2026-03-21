@@ -117,7 +117,7 @@ func (s *calendarSource) Duration() time.Duration {
 }
 
 func (s *calendarSource) Close() error {
-	return nil
+	return closeFaces(s.faces.header, s.faces.day)
 }
 
 func (s *calendarSource) render(dst *image.RGBA, now time.Time) {

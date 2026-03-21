@@ -118,7 +118,7 @@ func (s *sysstatSource) Duration() time.Duration {
 }
 
 func (s *sysstatSource) Close() error {
-	return nil
+	return closeFaces(s.faces.value)
 }
 
 func (s *sysstatSource) render(dst *image.RGBA, cpuPercent float64, memoryPercent float64) {

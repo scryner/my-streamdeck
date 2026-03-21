@@ -63,3 +63,22 @@ func TestNextFrameDelayUsesDynamicSource(t *testing.T) {
 		t.Fatalf("expected dynamic delay to win, got %s", got)
 	}
 }
+
+func TestImageSignatureChangesWithPixels(t *testing.T) {
+	t.Parallel()
+
+	a := image.NewRGBA(image.Rect(0, 0, 2, 2))
+	b := image.NewRGBA(image.Rect(0, 0, 2, 2))
+
+	sigA := imageSignature(a)
+	sigB := imageSignature(b)
+	if sigA != sigB {
+		t.Fatal("expected identical images to have identical signatures")
+	}
+
+	b.Set(1, 1, color.RGBA{R: 1, G: 2, B: 3, A: 255})
+	sigB = imageSignature(b)
+	if sigA == sigB {
+		t.Fatal("expected differing images to have differing signatures")
+	}
+}

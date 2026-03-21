@@ -251,7 +251,13 @@ func (s *weatherViewSource) Duration() time.Duration {
 }
 
 func (s *weatherViewSource) Close() error {
-	return nil
+	return closeFaces(
+		s.faces.todayDetail,
+		s.faces.todayTemp,
+		s.faces.today,
+		s.faces.forecastMain,
+		s.faces.forecastDetail,
+	)
 }
 
 func (w *WeatherWidget) start(ctx context.Context) error {

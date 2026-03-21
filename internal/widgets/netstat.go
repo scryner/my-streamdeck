@@ -142,7 +142,7 @@ func (s *netstatSource) Duration() time.Duration {
 }
 
 func (s *netstatSource) Close() error {
-	return nil
+	return closeFaces(s.faces.value, s.faces.iface)
 }
 
 func (s *netstatSource) readRates(ctx context.Context) (float64, float64, error) {

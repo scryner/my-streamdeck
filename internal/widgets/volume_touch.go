@@ -2,13 +2,10 @@ package widgets
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"image"
 	"image/color"
 	"math"
-	"os/exec"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +26,14 @@ const (
 	volumeTouchChangeStep       = 4
 	defaultUnknownOutputName    = "Unknown Output"
 	defaultVolumeOutputNameTrim = "..."
+)
+
+var startSystemVolumeObserver = startVolumeObserver
+var (
+	readSystemVolumeState  = readVolumeState
+	readSystemOutputSource = readOutputSourceName
+	setSystemOutputVolume  = setOutputVolume
+	setSystemOutputMuted   = setOutputMuted
 )
 
 type VolumeTouchWidgetOptions struct {
@@ -68,22 +73,20 @@ type volumeTouchFaces struct {
 }
 
 type volumeSystemBackend struct {
-	runCommand func(ctx context.Context, name string, args ...string) ([]byte, error)
-
 	mu sync.Mutex
 
 	cachedState     VolumeState
 	stateFetchedAt  time.Time
 	sourceFetchedAt time.Time
+	stopObserver    func()
 }
 
-type volumeTouchAudioProfile struct {
-	SPAudioDataType []struct {
-		Items []struct {
-			Name                     string `json:"_name"`
-			DefaultAudioOutputDevice string `json:"coreaudio_default_audio_output_device"`
-		} `json:"_items"`
-	} `json:"SPAudioDataType"`
+type volumeBackendWithChangeHandler interface {
+	SetChangeHandler(func()) error
+}
+
+type volumeBackendWithClose interface {
+	Close() error
 }
 
 func NewVolumeTouchWidget(options VolumeTouchWidgetOptions) (*VolumeTouchWidget, error) {
@@ -177,6 +180,9 @@ func (w *VolumeTouchWidget) toggleMute() error {
 }
 
 func (s *volumeTouchSource) Start(context.Context) error {
+	if backend, ok := s.audio.(volumeBackendWithChangeHandler); ok {
+		return backend.SetChangeHandler(s.notify)
+	}
 	return nil
 }
 
@@ -200,7 +206,13 @@ func (s *volumeTouchSource) Updates() <-chan struct{} {
 }
 
 func (s *volumeTouchSource) Close() error {
-	return closeFaces(s.faces.title, s.faces.percent)
+	err := closeFaces(s.faces.title, s.faces.percent)
+	if backend, ok := s.audio.(volumeBackendWithClose); ok {
+		if closeErr := backend.Close(); err == nil {
+			err = closeErr
+		}
+	}
+	return err
 }
 
 func (s *volumeTouchSource) notify() {
@@ -211,11 +223,51 @@ func (s *volumeTouchSource) notify() {
 }
 
 func newVolumeSystemBackend() *volumeSystemBackend {
-	return &volumeSystemBackend{
-		runCommand: func(ctx context.Context, name string, args ...string) ([]byte, error) {
-			return exec.CommandContext(ctx, name, args...).Output()
-		},
+	return &volumeSystemBackend{}
+}
+
+func (b *volumeSystemBackend) SetChangeHandler(fn func()) error {
+	b.mu.Lock()
+	stop := b.stopObserver
+	b.stopObserver = nil
+	b.mu.Unlock()
+	if stop != nil {
+		stop()
 	}
+	if fn == nil {
+		return nil
+	}
+
+	stop, err := startSystemVolumeObserver(func() {
+		b.invalidateStateCache()
+		fn()
+	})
+	if err != nil {
+		return err
+	}
+
+	b.mu.Lock()
+	b.stopObserver = stop
+	b.mu.Unlock()
+	return nil
+}
+
+func (b *volumeSystemBackend) Close() error {
+	b.mu.Lock()
+	stop := b.stopObserver
+	b.stopObserver = nil
+	b.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
+	return nil
+}
+
+func (b *volumeSystemBackend) invalidateStateCache() {
+	b.mu.Lock()
+	b.stateFetchedAt = time.Time{}
+	b.sourceFetchedAt = time.Time{}
+	b.mu.Unlock()
 }
 
 func (b *volumeSystemBackend) State(ctx context.Context) (VolumeState, error) {
@@ -265,52 +317,15 @@ func (b *volumeSystemBackend) State(ctx context.Context) (VolumeState, error) {
 
 func (b *volumeSystemBackend) SetVolume(ctx context.Context, percent int) error {
 	percent = clampVolumePercent(percent)
-
-	muted, err := b.currentMutedState(ctx)
-	if err != nil {
-		b.mu.Lock()
-		muted = b.cachedState.Muted
-		b.mu.Unlock()
-	}
-
-	script := fmt.Sprintf("set volume output volume %d without output muted", percent)
-	if muted {
-		script = fmt.Sprintf("set volume output volume %d with output muted", percent)
-	}
-	if _, err := b.runCommand(ctx, "/usr/bin/osascript", "-e", script); err != nil {
+	if err := setSystemOutputVolume(ctx, percent); err != nil {
 		return fmt.Errorf("set output volume: %w", err)
 	}
 
 	b.mu.Lock()
 	b.cachedState.Volume = percent
-	b.cachedState.Muted = muted
 	b.stateFetchedAt = time.Now()
 	b.mu.Unlock()
 	return nil
-}
-
-func (b *volumeSystemBackend) currentMutedState(ctx context.Context) (bool, error) {
-	now := time.Now()
-
-	b.mu.Lock()
-	if !b.stateFetchedAt.IsZero() && now.Sub(b.stateFetchedAt) < volumeStateCacheTTL {
-		muted := b.cachedState.Muted
-		b.mu.Unlock()
-		return muted, nil
-	}
-	b.mu.Unlock()
-
-	state, err := b.fetchVolumeState(ctx)
-	if err != nil {
-		return false, err
-	}
-
-	b.mu.Lock()
-	b.cachedState.Volume = state.Volume
-	b.cachedState.Muted = state.Muted
-	b.stateFetchedAt = now
-	b.mu.Unlock()
-	return state.Muted, nil
 }
 
 func (b *volumeSystemBackend) ToggleMute(ctx context.Context) error {
@@ -319,11 +334,7 @@ func (b *volumeSystemBackend) ToggleMute(ctx context.Context) error {
 		return err
 	}
 
-	script := "set volume with output muted"
-	if state.Muted {
-		script = "set volume without output muted"
-	}
-	if _, err := b.runCommand(ctx, "/usr/bin/osascript", "-e", script); err != nil {
+	if err := setSystemOutputMuted(ctx, !state.Muted); err != nil {
 		return fmt.Errorf("toggle output mute: %w", err)
 	}
 
@@ -335,52 +346,15 @@ func (b *volumeSystemBackend) ToggleMute(ctx context.Context) error {
 }
 
 func (b *volumeSystemBackend) fetchVolumeState(ctx context.Context) (VolumeState, error) {
-	output, err := b.runCommand(
-		ctx,
-		"/usr/bin/osascript",
-		"-e", "set v to get volume settings",
-		"-e", `return (output volume of v as string) & "," & (output muted of v as string)`,
-	)
-	if err != nil {
-		return VolumeState{}, fmt.Errorf("read volume state: %w", err)
-	}
-
-	parts := strings.Split(strings.TrimSpace(string(output)), ",")
-	if len(parts) != 2 {
-		return VolumeState{}, fmt.Errorf("read volume state: unexpected output %q", strings.TrimSpace(string(output)))
-	}
-
-	volume, err := strconv.Atoi(strings.TrimSpace(parts[0]))
-	if err != nil {
-		return VolumeState{}, fmt.Errorf("parse volume: %w", err)
-	}
-
-	return VolumeState{
-		Volume: clampVolumePercent(volume),
-		Muted:  strings.EqualFold(strings.TrimSpace(parts[1]), "true"),
-	}, nil
+	return readSystemVolumeState(ctx)
 }
 
 func (b *volumeSystemBackend) fetchOutputSource(ctx context.Context) (string, error) {
-	output, err := b.runCommand(ctx, "/usr/sbin/system_profiler", "SPAudioDataType", "-json")
+	name, err := readSystemOutputSource(ctx)
 	if err != nil {
-		return "", fmt.Errorf("read output source: %w", err)
+		return "", err
 	}
-
-	var profile volumeTouchAudioProfile
-	if err := json.Unmarshal(output, &profile); err != nil {
-		return "", fmt.Errorf("decode output source: %w", err)
-	}
-
-	for _, group := range profile.SPAudioDataType {
-		for _, item := range group.Items {
-			if item.DefaultAudioOutputDevice == "spaudio_yes" {
-				return normalizeOutputSourceName(item.Name), nil
-			}
-		}
-	}
-
-	return "", fmt.Errorf("default output source not found")
+	return normalizeOutputSourceName(name), nil
 }
 
 func normalizeOutputSourceName(name string) string {

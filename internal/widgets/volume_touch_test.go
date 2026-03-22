@@ -4,7 +4,6 @@ import (
 	"context"
 	"image"
 	"image/color"
-	"strings"
 	"testing"
 	"time"
 
@@ -185,19 +184,21 @@ func TestVolumeTouchWidgetRenderProducesVisibleContent(t *testing.T) {
 func TestVolumeSystemBackendNormalizesSourceName(t *testing.T) {
 	t.Parallel()
 
-	backend := &volumeSystemBackend{
-		runCommand: func(_ context.Context, name string, _ ...string) ([]byte, error) {
-			switch name {
-			case "/usr/bin/osascript":
-				return []byte("28,false"), nil
-			case "/usr/sbin/system_profiler":
-				return []byte(`{"SPAudioDataType":[{"_items":[{"_name":"Studio Display XDR 스피커","coreaudio_default_audio_output_device":"spaudio_yes"}]}]}`), nil
-			default:
-				t.Fatalf("unexpected command: %s", name)
-				return nil, nil
-			}
-		},
+	originalReadState := readSystemVolumeState
+	originalReadSource := readSystemOutputSource
+	defer func() {
+		readSystemVolumeState = originalReadState
+		readSystemOutputSource = originalReadSource
+	}()
+
+	readSystemVolumeState = func(context.Context) (VolumeState, error) {
+		return VolumeState{Volume: 28, Muted: false}, nil
 	}
+	readSystemOutputSource = func(context.Context) (string, error) {
+		return "Studio Display XDR 스피커", nil
+	}
+
+	backend := newVolumeSystemBackend()
 
 	state, err := backend.State(context.Background())
 	if err != nil {
@@ -211,56 +212,87 @@ func TestVolumeSystemBackendNormalizesSourceName(t *testing.T) {
 func TestVolumeSystemBackendSetVolumeDoesNotMuteWhenUnmuted(t *testing.T) {
 	t.Parallel()
 
-	var scripts []string
-	backend := &volumeSystemBackend{
-		runCommand: func(_ context.Context, name string, args ...string) ([]byte, error) {
-			if name != "/usr/bin/osascript" {
-				t.Fatalf("unexpected command: %s", name)
-			}
-			script := strings.Join(args, " ")
-			scripts = append(scripts, script)
-			if strings.Contains(script, "get volume settings") {
-				return []byte("4,false"), nil
-			}
-			return nil, nil
-		},
+	originalSetVolume := setSystemOutputVolume
+	defer func() {
+		setSystemOutputVolume = originalSetVolume
+	}()
+
+	var gotPercent int
+	setSystemOutputVolume = func(_ context.Context, percent int) error {
+		gotPercent = percent
+		return nil
 	}
+
+	backend := newVolumeSystemBackend()
+	backend.cachedState.Muted = false
+	backend.stateFetchedAt = time.Now()
 
 	if err := backend.SetVolume(context.Background(), 0); err != nil {
 		t.Fatalf("SetVolume: %v", err)
 	}
-
-	last := scripts[len(scripts)-1]
-	if !strings.Contains(last, "set volume output volume 0 without output muted") {
-		t.Fatalf("expected unmuted volume set script, got %q", last)
+	if gotPercent != 0 {
+		t.Fatalf("expected output volume 0, got %d", gotPercent)
+	}
+	if backend.cachedState.Muted {
+		t.Fatal("expected mute state to remain false")
 	}
 }
 
 func TestVolumeSystemBackendSetVolumePreservesMutedState(t *testing.T) {
 	t.Parallel()
 
-	var scripts []string
-	backend := &volumeSystemBackend{
-		runCommand: func(_ context.Context, name string, args ...string) ([]byte, error) {
-			if name != "/usr/bin/osascript" {
-				t.Fatalf("unexpected command: %s", name)
-			}
-			script := strings.Join(args, " ")
-			scripts = append(scripts, script)
-			if strings.Contains(script, "get volume settings") {
-				return []byte("24,true"), nil
-			}
-			return nil, nil
-		},
+	originalSetVolume := setSystemOutputVolume
+	defer func() {
+		setSystemOutputVolume = originalSetVolume
+	}()
+
+	var gotPercent int
+	setSystemOutputVolume = func(_ context.Context, percent int) error {
+		gotPercent = percent
+		return nil
 	}
+
+	backend := newVolumeSystemBackend()
+	backend.cachedState.Muted = true
+	backend.stateFetchedAt = time.Now()
 
 	if err := backend.SetVolume(context.Background(), 16); err != nil {
 		t.Fatalf("SetVolume: %v", err)
 	}
+	if gotPercent != 16 {
+		t.Fatalf("expected output volume 16, got %d", gotPercent)
+	}
+	if !backend.cachedState.Muted {
+		t.Fatal("expected mute state to remain true")
+	}
+}
 
-	last := scripts[len(scripts)-1]
-	if !strings.Contains(last, "set volume output volume 16 with output muted") {
-		t.Fatalf("expected muted volume set script, got %q", last)
+func TestVolumeSystemBackendToggleMuteUsesCoreAudioMuteSetter(t *testing.T) {
+	t.Parallel()
+
+	originalReadState := readSystemVolumeState
+	originalSetMuted := setSystemOutputMuted
+	defer func() {
+		readSystemVolumeState = originalReadState
+		setSystemOutputMuted = originalSetMuted
+	}()
+
+	readSystemVolumeState = func(context.Context) (VolumeState, error) {
+		return VolumeState{Volume: 24, Muted: false}, nil
+	}
+
+	var mutedValues []bool
+	setSystemOutputMuted = func(_ context.Context, muted bool) error {
+		mutedValues = append(mutedValues, muted)
+		return nil
+	}
+
+	backend := newVolumeSystemBackend()
+	if err := backend.ToggleMute(context.Background()); err != nil {
+		t.Fatalf("ToggleMute: %v", err)
+	}
+	if len(mutedValues) != 1 || !mutedValues[0] {
+		t.Fatalf("expected mute setter to be called with true, got %v", mutedValues)
 	}
 }
 
@@ -288,6 +320,63 @@ func TestVolumeSourceNotifiesOnStateChange(t *testing.T) {
 	case <-widget.source.Updates():
 	case <-time.After(time.Second):
 		t.Fatal("expected update notification")
+	}
+}
+
+func TestVolumeSystemBackendChangeHandlerInvalidatesCache(t *testing.T) {
+	originalStartObserver := startSystemVolumeObserver
+	defer func() {
+		startSystemVolumeObserver = originalStartObserver
+	}()
+
+	var (
+		callback func()
+		stops    int
+		notified int
+	)
+	startSystemVolumeObserver = func(fn func()) (func(), error) {
+		callback = fn
+		return func() {
+			stops++
+		}, nil
+	}
+
+	backend := newVolumeSystemBackend()
+	backend.cachedState = VolumeState{Source: "Studio Display XDR", Volume: 16}
+	backend.stateFetchedAt = time.Now()
+	backend.sourceFetchedAt = time.Now()
+
+	if err := backend.SetChangeHandler(func() {
+		notified++
+	}); err != nil {
+		t.Fatalf("SetChangeHandler: %v", err)
+	}
+	if callback == nil {
+		t.Fatal("expected observer callback to be registered")
+	}
+
+	callback()
+
+	backend.mu.Lock()
+	stateFetchedAt := backend.stateFetchedAt
+	sourceFetchedAt := backend.sourceFetchedAt
+	backend.mu.Unlock()
+
+	if !stateFetchedAt.IsZero() {
+		t.Fatal("expected state cache timestamp to be invalidated")
+	}
+	if !sourceFetchedAt.IsZero() {
+		t.Fatal("expected source cache timestamp to be invalidated")
+	}
+	if notified != 1 {
+		t.Fatalf("expected one change notification, got %d", notified)
+	}
+
+	if err := backend.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if stops != 1 {
+		t.Fatalf("expected observer stop to be called once, got %d", stops)
 	}
 }
 

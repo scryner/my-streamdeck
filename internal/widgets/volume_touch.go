@@ -13,6 +13,7 @@ import (
 	"github.com/scryner/my-streamdeck/internal/decktouch"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/gofont/gobold"
+	"golang.org/x/text/unicode/norm"
 	"rafaelmartins.com/p/streamdeck"
 )
 
@@ -359,6 +360,7 @@ func (b *volumeSystemBackend) fetchOutputSource(ctx context.Context) (string, er
 
 func normalizeOutputSourceName(name string) string {
 	name = strings.ReplaceAll(name, "\u00a0", " ")
+	name = norm.NFC.String(name)
 	name = strings.TrimSpace(name)
 
 	suffixes := []string{
@@ -381,9 +383,12 @@ func normalizeOutputSourceName(name string) string {
 func loadVolumeTouchFaces(size image.Point) (volumeTouchFaces, error) {
 	scale := math.Min(float64(size.X)/200.0, float64(size.Y)/100.0)
 
-	title, err := newFace(gobold.TTF, 16*scale)
+	title, err := newHangulCapableFace(16 * scale)
 	if err != nil {
-		return volumeTouchFaces{}, fmt.Errorf("load volume touch title font: %w", err)
+		title, err = newFace(gobold.TTF, 16*scale)
+		if err != nil {
+			return volumeTouchFaces{}, fmt.Errorf("load volume touch title font: %w", err)
+		}
 	}
 	percent, err := newFace(gobold.TTF, 29*scale)
 	if err != nil {

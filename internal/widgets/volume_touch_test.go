@@ -209,6 +209,15 @@ func TestVolumeSystemBackendNormalizesSourceName(t *testing.T) {
 	}
 }
 
+func TestNormalizeOutputSourceNameNormalizesDecomposedHangul(t *testing.T) {
+	t.Parallel()
+
+	got := normalizeOutputSourceName("스피커")
+	if got != "스피커" {
+		t.Fatalf("unexpected normalized source: %q", got)
+	}
+}
+
 func TestVolumeSystemBackendSetVolumeDoesNotMuteWhenUnmuted(t *testing.T) {
 	t.Parallel()
 

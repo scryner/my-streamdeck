@@ -235,6 +235,17 @@ func buildTouchWidgets(device *streamdeck.Device) ([]widgets.TouchWidget, error)
 		}
 		touchWidgets = append(touchWidgets, brightnessWidget)
 	}
+	if device.GetDialCount() >= 4 {
+		playRect := decktouch.WIDGET_4.TouchStripRect(stripBounds)
+		playWidget, err := widgets.NewPlayTouchWidget(widgets.PlayTouchWidgetOptions{
+			ID:   decktouch.WIDGET_4,
+			Size: playRect.Size(),
+		})
+		if err != nil {
+			return nil, err
+		}
+		touchWidgets = append(touchWidgets, playWidget)
+	}
 
 	return touchWidgets, nil
 }

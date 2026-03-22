@@ -162,13 +162,12 @@ func (s *microphoneTouchSource) Updates() <-chan struct{} {
 }
 
 func (s *microphoneTouchSource) Close() error {
-	err := closeFaces(s.faces.title, s.faces.percent)
 	if backend, ok := s.audio.(volumeBackendWithClose); ok {
-		if closeErr := backend.Close(); err == nil {
-			err = closeErr
+		if err := backend.Close(); err != nil {
+			return err
 		}
 	}
-	return err
+	return closeFaces(s.faces.title, s.faces.percent)
 }
 
 func (s *microphoneTouchSource) notify() {

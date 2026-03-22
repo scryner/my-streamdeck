@@ -255,11 +255,14 @@ func startAudioEndpointObserver(kind audioEndpointKind, fn func()) (func(), erro
 		return nil, fmt.Errorf("start volume observer: register Core Audio property listeners")
 	}
 
+	var once sync.Once
 	return func() {
-		C.myStreamDeckStopVolumeObserver(observer)
-		volumeObserverMu.Lock()
-		delete(volumeObserverHandlers, token)
-		volumeObserverMu.Unlock()
+		once.Do(func() {
+			volumeObserverMu.Lock()
+			delete(volumeObserverHandlers, token)
+			volumeObserverMu.Unlock()
+			C.myStreamDeckStopVolumeObserver(observer)
+		})
 	}, nil
 }
 

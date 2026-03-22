@@ -216,13 +216,12 @@ func (s *volumeTouchSource) Updates() <-chan struct{} {
 }
 
 func (s *volumeTouchSource) Close() error {
-	err := closeFaces(s.faces.title, s.faces.percent)
 	if backend, ok := s.audio.(volumeBackendWithClose); ok {
-		if closeErr := backend.Close(); err == nil {
-			err = closeErr
+		if err := backend.Close(); err != nil {
+			return err
 		}
 	}
-	return err
+	return closeFaces(s.faces.title, s.faces.percent)
 }
 
 func (s *volumeTouchSource) notify() {
@@ -277,6 +276,11 @@ func (b *audioSystemBackend) Close() error {
 	if stop != nil {
 		stop()
 	}
+	b.mu.Lock()
+	b.cachedState = VolumeState{}
+	b.stateFetchedAt = time.Time{}
+	b.sourceFetchedAt = time.Time{}
+	b.mu.Unlock()
 	return nil
 }
 

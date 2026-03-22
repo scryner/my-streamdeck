@@ -387,6 +387,18 @@ func TestVolumeSystemBackendChangeHandlerInvalidatesCache(t *testing.T) {
 	if stops != 1 {
 		t.Fatalf("expected observer stop to be called once, got %d", stops)
 	}
+
+	backend.mu.Lock()
+	cachedState := backend.cachedState
+	stateFetchedAt = backend.stateFetchedAt
+	sourceFetchedAt = backend.sourceFetchedAt
+	backend.mu.Unlock()
+	if cachedState != (VolumeState{}) {
+		t.Fatalf("expected cached state to be cleared on close, got %+v", cachedState)
+	}
+	if !stateFetchedAt.IsZero() || !sourceFetchedAt.IsZero() {
+		t.Fatal("expected cache timestamps to be cleared on close")
+	}
 }
 
 func TestDrawVolumeSliderFollowsProgress(t *testing.T) {

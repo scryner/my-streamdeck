@@ -25,6 +25,7 @@ import (
 
 const (
 	weatherCacheRefreshInterval = 10 * time.Minute
+	weatherCacheRetryInterval   = 30 * time.Second
 	weatherViewUpdateInterval   = 5 * time.Minute
 )
 
@@ -53,6 +54,8 @@ type WeatherWidget struct {
 	stateMu sync.RWMutex
 	cached  weatherSnapshot
 	hasData bool
+
+	subscribers map[chan struct{}]struct{}
 }
 
 type WeatherTodayWidget struct {
@@ -66,9 +69,10 @@ type WeatherForecastWidget struct {
 }
 
 type weatherViewSource struct {
-	widget *WeatherWidget
-	view   weatherViewKind
-	faces  weatherFaces
+	widget  *WeatherWidget
+	view    weatherViewKind
+	faces   weatherFaces
+	updates chan struct{}
 }
 
 type weatherViewKind int
@@ -161,6 +165,7 @@ func NewWeatherWidget(options WeatherWidgetOptions) (*WeatherWidget, error) {
 		httpClient:    options.HTTPClient,
 		todayFaces:    todayFaces,
 		forecastFaces: forecastFaces,
+		subscribers:   make(map[chan struct{}]struct{}),
 	}
 	if options.Fetch != nil {
 		widget.fetch = options.Fetch
@@ -216,6 +221,10 @@ func (w *WeatherForecastWidget) Button() deckbutton.Button {
 }
 
 func (s *weatherViewSource) Start(ctx context.Context) error {
+	if s.updates == nil {
+		s.updates = make(chan struct{}, 1)
+		s.widget.registerUpdates(s.updates)
+	}
 	return s.widget.start(ctx)
 }
 
@@ -232,7 +241,7 @@ func (s *weatherViewSource) FrameAt(ctx context.Context, _ time.Duration) (image
 	img := image.NewRGBA(image.Rect(0, 0, s.widget.size, s.widget.size))
 	snapshot, ok := s.widget.currentSnapshot()
 	if !ok {
-		s.renderLoading(img)
+		s.renderUnavailable(img)
 		return img, nil
 	}
 
@@ -250,7 +259,13 @@ func (s *weatherViewSource) Duration() time.Duration {
 	return 0
 }
 
+func (s *weatherViewSource) Updates() <-chan struct{} {
+	return s.updates
+}
+
 func (s *weatherViewSource) Close() error {
+	s.widget.unregisterUpdates(s.updates)
+
 	return closeFaces(
 		s.faces.todayDetail,
 		s.faces.todayTemp,
@@ -262,18 +277,28 @@ func (s *weatherViewSource) Close() error {
 
 func (w *WeatherWidget) start(ctx context.Context) error {
 	w.startOnce.Do(func() {
-		_ = w.refresh(ctx)
+		err := w.refresh(ctx)
 
 		go func() {
-			ticker := time.NewTicker(weatherCacheRefreshInterval)
-			defer ticker.Stop()
+			delay := weatherCacheRefreshInterval
+			if err != nil {
+				delay = weatherCacheRetryInterval
+			}
+
+			timer := time.NewTimer(delay)
+			defer timer.Stop()
 
 			for {
 				select {
 				case <-ctx.Done():
 					return
-				case <-ticker.C:
-					_ = w.refresh(ctx)
+				case <-timer.C:
+					if err := w.refresh(ctx); err != nil {
+						delay = weatherCacheRetryInterval
+					} else {
+						delay = weatherCacheRefreshInterval
+					}
+					timer.Reset(delay)
 				}
 			}
 		}()
@@ -292,7 +317,44 @@ func (w *WeatherWidget) refresh(ctx context.Context) error {
 	w.cached = snapshot
 	w.hasData = true
 	w.stateMu.Unlock()
+	w.notifySubscribers()
 	return nil
+}
+
+func (w *WeatherWidget) registerUpdates(ch chan struct{}) {
+	if ch == nil {
+		return
+	}
+
+	w.stateMu.Lock()
+	w.subscribers[ch] = struct{}{}
+	w.stateMu.Unlock()
+}
+
+func (w *WeatherWidget) unregisterUpdates(ch chan struct{}) {
+	if ch == nil {
+		return
+	}
+
+	w.stateMu.Lock()
+	delete(w.subscribers, ch)
+	w.stateMu.Unlock()
+}
+
+func (w *WeatherWidget) notifySubscribers() {
+	w.stateMu.RLock()
+	subscribers := make([]chan struct{}, 0, len(w.subscribers))
+	for ch := range w.subscribers {
+		subscribers = append(subscribers, ch)
+	}
+	w.stateMu.RUnlock()
+
+	for _, ch := range subscribers {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
 }
 
 func (w *WeatherWidget) currentSnapshot() (weatherSnapshot, bool) {
@@ -502,8 +564,28 @@ func loadWeatherFaces(size int) (weatherFaces, error) {
 	}, nil
 }
 
-func (s *weatherViewSource) renderLoading(dst *image.RGBA) {
-	drawCenteredText(dst, s.faces.today, "Loading", float64(s.widget.size)/2, centeredTextBaselineY(s.faces.today, float64(s.widget.size)*0.48), color.RGBA{R: 244, G: 246, B: 248, A: 255})
+func (s *weatherViewSource) renderUnavailable(dst *image.RGBA) {
+	switch s.view {
+	case weatherViewToday:
+		s.renderToday(dst, weatherSnapshot{
+			Current: weatherCurrent{
+				TempC:     "__",
+				Condition: "Unavailable",
+				UVIndex:   "__",
+			},
+			Days: []weatherDay{
+				{MinTempC: "__", MaxTempC: "__"},
+			},
+		})
+	default:
+		s.renderForecast(dst, weatherSnapshot{
+			Days: []weatherDay{
+				{MinTempC: "__", MaxTempC: "__"},
+				{MinTempC: "__", MaxTempC: "__"},
+				{MinTempC: "__", MaxTempC: "__"},
+			},
+		})
+	}
 }
 
 func (s *weatherViewSource) renderToday(dst *image.RGBA, snapshot weatherSnapshot) {
@@ -529,11 +611,10 @@ func (s *weatherViewSource) renderForecast(dst *image.RGBA, snapshot weatherSnap
 	iconColumnWidth := int(float64(s.widget.size) * 0.34)
 
 	for i := 0; i < 3; i++ {
-		if i >= len(snapshot.Days) {
-			break
+		day := weatherDay{MinTempC: "__", MaxTempC: "__"}
+		if i < len(snapshot.Days) {
+			day = snapshot.Days[i]
 		}
-
-		day := snapshot.Days[i]
 		rowTop := i * rowHeight
 		rowBottom := rowTop + rowHeight
 		iconRect := image.Rect(
@@ -557,6 +638,14 @@ func valueOrDash(value string) string {
 	return value
 }
 
+func valueOrPlaceholder(value string, placeholder string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return placeholder
+	}
+	return value
+}
+
 func drawWeatherIcon(dst *image.RGBA, src image.Image, rect image.Rectangle) {
 	if src == nil {
 		return
@@ -566,7 +655,7 @@ func drawWeatherIcon(dst *image.RGBA, src image.Image, rect image.Rectangle) {
 }
 
 func drawSuperscriptTemperature(dst *image.RGBA, face font.Face, value string, centerX float64, baselineY float64, c color.RGBA) {
-	value = valueOrDash(value)
+	value = valueOrPlaceholder(value, "__")
 	valueWidth := measureTextWidth(face, value)
 	gap := float64(scaledValue(dst.Bounds().Dx(), 1))
 	degreeDiameter := float64(scaledValue(dst.Bounds().Dx(), 4))
@@ -584,8 +673,8 @@ func drawSuperscriptTemperature(dst *image.RGBA, face font.Face, value string, c
 }
 
 func drawTemperatureRange(dst *image.RGBA, face font.Face, minTemp string, maxTemp string, centerX float64, baselineY float64, c color.RGBA) {
-	minText := valueOrDash(minTemp)
-	maxText := valueOrDash(maxTemp)
+	minText := valueOrPlaceholder(minTemp, "__")
+	maxText := valueOrPlaceholder(maxTemp, "__")
 	separator := " / "
 
 	minWidth := measureTextWidth(face, minText)

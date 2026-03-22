@@ -191,6 +191,120 @@ func TestWeatherWidgetTodayAndForecastShareCache(t *testing.T) {
 	}
 }
 
+func TestWeatherWidgetRefreshNotifiesSubscribers(t *testing.T) {
+	t.Parallel()
+
+	widget, err := NewWeatherWidget(WeatherWidgetOptions{
+		Location: "Seoul",
+		Fetch: func(context.Context, string) (weatherSnapshot, error) {
+			return weatherSnapshot{
+				Location: "Seoul",
+				Current: weatherCurrent{
+					TempC:     "9",
+					Condition: "Sunny",
+					UVIndex:   "3",
+				},
+				Days: []weatherDay{
+					{Date: time.Date(2026, time.March, 21, 0, 0, 0, 0, time.UTC), MinTempC: "4", MaxTempC: "12", Condition: "Sunny"},
+				},
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewWeatherWidget: %v", err)
+	}
+
+	updates := make(chan struct{}, 1)
+	widget.registerUpdates(updates)
+	defer widget.unregisterUpdates(updates)
+
+	if err := widget.refresh(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	select {
+	case <-updates:
+	default:
+		t.Fatal("expected weather refresh to notify subscribers")
+	}
+}
+
+func TestWeatherForecastRendersPlaceholderWithoutData(t *testing.T) {
+	t.Parallel()
+
+	widget, err := NewWeatherWidget(WeatherWidgetOptions{
+		Location: "Seoul",
+		Fetch: func(context.Context, string) (weatherSnapshot, error) {
+			return weatherSnapshot{}, context.DeadlineExceeded
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewWeatherWidget: %v", err)
+	}
+
+	frame, err := widget.Forecast(streamdeck.KEY_6).Button().Animation.Source.FrameAt(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("FrameAt: %v", err)
+	}
+
+	visiblePixels := 0
+	for y := 0; y < DefaultClockWidgetSize; y++ {
+		for x := 0; x < DefaultClockWidgetSize; x++ {
+			r, g, b, _ := frame.At(x, y).RGBA()
+			if maxUint32(r, g, b) > 0x7000 {
+				visiblePixels++
+			}
+		}
+	}
+	if visiblePixels == 0 {
+		t.Fatal("expected forecast placeholder to render visible content without data")
+	}
+}
+
+func TestWeatherForecastRendersPlaceholderWhenDaysMissing(t *testing.T) {
+	t.Parallel()
+
+	widget, err := NewWeatherWidget(WeatherWidgetOptions{
+		Location: "Seoul",
+		Fetch: func(context.Context, string) (weatherSnapshot, error) {
+			return weatherSnapshot{
+				Location: "Seoul",
+				Current: weatherCurrent{
+					TempC:     "9",
+					Condition: "Sunny",
+					UVIndex:   "3",
+				},
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewWeatherWidget: %v", err)
+	}
+
+	source := widget.Forecast(streamdeck.KEY_6).Button().Animation.Source
+	if err := source.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	frame, err := source.FrameAt(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("FrameAt: %v", err)
+	}
+
+	visiblePixels := 0
+	for y := 0; y < DefaultClockWidgetSize; y++ {
+		for x := 0; x < DefaultClockWidgetSize; x++ {
+			r, g, b, _ := frame.At(x, y).RGBA()
+			if maxUint32(r, g, b) > 0x7000 {
+				visiblePixels++
+			}
+		}
+	}
+	if visiblePixels == 0 {
+		t.Fatal("expected forecast placeholder to render visible content when days are missing")
+	}
+}
+
 func TestParseWeatherSnapshot(t *testing.T) {
 	t.Parallel()
 

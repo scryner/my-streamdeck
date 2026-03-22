@@ -305,6 +305,35 @@ func TestWeatherForecastRendersPlaceholderWhenDaysMissing(t *testing.T) {
 	}
 }
 
+func TestWeatherTodayDetailFaceFitsLongCondition(t *testing.T) {
+	t.Parallel()
+
+	widget, err := NewWeatherWidget(WeatherWidgetOptions{
+		Location: "Seoul",
+		Size:     144,
+	})
+	if err != nil {
+		t.Fatalf("NewWeatherWidget: %v", err)
+	}
+
+	source := widget.Today(streamdeck.KEY_5).source
+	maxWidth := float64(widget.size - scaledValue(widget.size, 8))
+	text := "Partly cloudy showers"
+
+	if measureTextWidth(source.faces.todayDetail, text) <= maxWidth {
+		t.Fatal("expected base today detail face to exceed max width for this test")
+	}
+
+	face, owned := source.fitTodayDetailFace(text, maxWidth)
+	if owned {
+		defer face.Close()
+	}
+
+	if width := measureTextWidth(face, text); width > maxWidth {
+		t.Fatalf("expected fitted face width <= %.2f, got %.2f", maxWidth, width)
+	}
+}
+
 func TestParseWeatherSnapshot(t *testing.T) {
 	t.Parallel()
 

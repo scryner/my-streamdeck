@@ -596,7 +596,11 @@ func (s *weatherViewSource) renderToday(dst *image.RGBA, snapshot weatherSnapsho
 		todayRange = snapshot.Days[0]
 	}
 
-	drawCenteredText(dst, s.faces.todayDetail, snapshot.Current.Condition, centerX, centeredTextBaselineY(s.faces.todayDetail, rowHeight*0.58), color.RGBA{R: 116, G: 236, B: 255, A: 255})
+	detailFace, closeDetailFace := s.fitTodayDetailFace(snapshot.Current.Condition, float64(s.widget.size-scaledValue(s.widget.size, 8)))
+	if closeDetailFace {
+		defer detailFace.Close()
+	}
+	drawCenteredText(dst, detailFace, snapshot.Current.Condition, centerX, centeredTextBaselineY(detailFace, rowHeight*0.58), color.RGBA{R: 116, G: 236, B: 255, A: 255})
 	drawSuperscriptTemperature(dst, s.faces.todayTemp, snapshot.Current.TempC, centerX, centeredTextBaselineY(s.faces.todayTemp, rowHeight*1.46), color.RGBA{R: 247, G: 248, B: 250, A: 255})
 	lineY := int(rowHeight * 2)
 	for x := range s.widget.size {
@@ -704,4 +708,41 @@ func drawDegreeMarker(dst *image.RGBA, centerX float64, centerY float64, radius 
 		innerRadius = 0
 	}
 	drawRing(dst, centerX, centerY, radius, innerRadius, c)
+}
+
+func (s *weatherViewSource) fitTodayDetailFace(text string, maxWidth float64) (font.Face, bool) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return s.faces.todayDetail, false
+	}
+
+	baseFace := s.faces.todayDetail
+	baseWidth := measureTextWidth(baseFace, text)
+	if baseWidth <= maxWidth {
+		return baseFace, false
+	}
+
+	scale := float64(s.widget.size) / 72.0
+	baseSize := 13.5 * scale
+	minSize := 5.0 * scale
+	targetSize := baseSize * (maxWidth / baseWidth)
+	if targetSize > baseSize {
+		targetSize = baseSize
+	}
+	if targetSize < minSize {
+		targetSize = minSize
+	}
+
+	for size := targetSize; size >= minSize; size -= 0.25 {
+		face, err := newFace(gobold.TTF, size)
+		if err != nil {
+			break
+		}
+		if measureTextWidth(face, text) <= maxWidth || size == minSize {
+			return face, true
+		}
+		_ = face.Close()
+	}
+
+	return baseFace, false
 }

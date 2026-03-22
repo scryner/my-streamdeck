@@ -224,6 +224,17 @@ func buildTouchWidgets(device *streamdeck.Device) ([]widgets.TouchWidget, error)
 		}
 		touchWidgets = append(touchWidgets, microphoneWidget)
 	}
+	if device.GetDialCount() >= 3 {
+		brightnessRect := decktouch.WIDGET_3.TouchStripRect(stripBounds)
+		brightnessWidget, err := widgets.NewBrightnessTouchWidget(widgets.BrightnessTouchWidgetOptions{
+			ID:   decktouch.WIDGET_3,
+			Size: brightnessRect.Size(),
+		})
+		if err != nil {
+			return nil, err
+		}
+		touchWidgets = append(touchWidgets, brightnessWidget)
+	}
 
 	return touchWidgets, nil
 }

@@ -18,11 +18,11 @@ const (
 )
 
 type Config struct {
-	Widgets  []WidgetConfig      `yaml:"widgets"`
-	Settings []map[string]string `yaml:"settings"`
+	ButtonWidgets []ButtonWidgetConfig `yaml:"widgets"`
+	Settings      []map[string]string  `yaml:"settings"`
 }
 
-type WidgetConfig struct {
+type ButtonWidgetConfig struct {
 	Type      string `yaml:"type"`
 	First     string `yaml:"first,omitempty"`
 	Interface string `yaml:"interface,omitempty"`
@@ -54,7 +54,7 @@ func TemplatePath() (string, error) {
 
 func DefaultConfig() Config {
 	return Config{
-		Widgets: []WidgetConfig{
+		ButtonWidgets: []ButtonWidgetConfig{
 			{Type: "clock", First: "analog"},
 			{Type: "calendar"},
 			{Type: "sysstat"},

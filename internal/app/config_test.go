@@ -25,15 +25,15 @@ func TestDefaultConfigContainsOnlyWidgetsWithoutRequiredSettings(t *testing.T) {
 	t.Parallel()
 
 	cfg := DefaultConfig()
-	if len(cfg.Widgets) != 4 {
-		t.Fatalf("expected 4 default widgets, got %d", len(cfg.Widgets))
+	if len(cfg.ButtonWidgets) != 4 {
+		t.Fatalf("expected 4 default button widgets, got %d", len(cfg.ButtonWidgets))
 	}
 
 	got := []string{
-		cfg.Widgets[0].Type,
-		cfg.Widgets[1].Type,
-		cfg.Widgets[2].Type,
-		cfg.Widgets[3].Type,
+		cfg.ButtonWidgets[0].Type,
+		cfg.ButtonWidgets[1].Type,
+		cfg.ButtonWidgets[2].Type,
+		cfg.ButtonWidgets[3].Type,
 	}
 	want := []string{"clock", "calendar", "sysstat", "caffeinate"}
 	for i := range want {

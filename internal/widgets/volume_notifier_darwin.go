@@ -11,8 +11,12 @@ package widgets
 
 extern void myStreamDeckHandleVolumeChange(uintptr_t token);
 
+#define MY_STREAM_DECK_ENDPOINT_OUTPUT 0
+#define MY_STREAM_DECK_ENDPOINT_INPUT 1
+
 typedef struct {
 	uintptr_t token;
+	int kind;
 	AudioObjectID currentDeviceID;
 	int hasDefaultOutputListener;
 	int hasServiceRestartListener;
@@ -21,9 +25,17 @@ typedef struct {
 	int hasDataSourceListener;
 } MyStreamDeckVolumeObserver;
 
-static AudioObjectPropertyAddress myStreamDeckDefaultOutputAddress(void) {
+static AudioObjectPropertyScope myStreamDeckObserverScope(int kind) {
+	return kind == MY_STREAM_DECK_ENDPOINT_INPUT ? kAudioDevicePropertyScopeInput : kAudioDevicePropertyScopeOutput;
+}
+
+static AudioObjectPropertySelector myStreamDeckObserverDefaultSelector(int kind) {
+	return kind == MY_STREAM_DECK_ENDPOINT_INPUT ? kAudioHardwarePropertyDefaultInputDevice : kAudioHardwarePropertyDefaultOutputDevice;
+}
+
+static AudioObjectPropertyAddress myStreamDeckDefaultAddress(int kind) {
 	AudioObjectPropertyAddress address = {
-		kAudioHardwarePropertyDefaultOutputDevice,
+		myStreamDeckObserverDefaultSelector(kind),
 		kAudioObjectPropertyScopeGlobal,
 		kAudioObjectPropertyElementMain,
 	};
@@ -39,28 +51,28 @@ static AudioObjectPropertyAddress myStreamDeckServiceRestartAddress(void) {
 	return address;
 }
 
-static AudioObjectPropertyAddress myStreamDeckVolumeAddress(void) {
+static AudioObjectPropertyAddress myStreamDeckVolumeAddress(int kind) {
 	AudioObjectPropertyAddress address = {
 		kAudioHardwareServiceDeviceProperty_VirtualMainVolume,
-		kAudioDevicePropertyScopeOutput,
+		myStreamDeckObserverScope(kind),
 		kAudioObjectPropertyElementMain,
 	};
 	return address;
 }
 
-static AudioObjectPropertyAddress myStreamDeckMuteAddress(void) {
+static AudioObjectPropertyAddress myStreamDeckMuteAddress(int kind) {
 	AudioObjectPropertyAddress address = {
 		kAudioDevicePropertyMute,
-		kAudioDevicePropertyScopeOutput,
+		myStreamDeckObserverScope(kind),
 		kAudioObjectPropertyElementMain,
 	};
 	return address;
 }
 
-static AudioObjectPropertyAddress myStreamDeckDataSourceAddress(void) {
+static AudioObjectPropertyAddress myStreamDeckDataSourceAddress(int kind) {
 	AudioObjectPropertyAddress address = {
 		kAudioDevicePropertyDataSource,
-		kAudioDevicePropertyScopeOutput,
+		myStreamDeckObserverScope(kind),
 		kAudioObjectPropertyElementMain,
 	};
 	return address;
@@ -102,9 +114,9 @@ static void myStreamDeckVolumeObserverUnregisterCurrentDeviceListeners(MyStreamD
 		return;
 	}
 
-	AudioObjectPropertyAddress volumeAddress = myStreamDeckVolumeAddress();
-	AudioObjectPropertyAddress muteAddress = myStreamDeckMuteAddress();
-	AudioObjectPropertyAddress dataSourceAddress = myStreamDeckDataSourceAddress();
+	AudioObjectPropertyAddress volumeAddress = myStreamDeckVolumeAddress(observer->kind);
+	AudioObjectPropertyAddress muteAddress = myStreamDeckMuteAddress(observer->kind);
+	AudioObjectPropertyAddress dataSourceAddress = myStreamDeckDataSourceAddress(observer->kind);
 
 	if (observer->hasVolumeListener) {
 		AudioObjectRemovePropertyListener(observer->currentDeviceID, &volumeAddress, myStreamDeckVolumePropertyListener, observer);
@@ -129,17 +141,17 @@ static void myStreamDeckVolumeObserverRegisterCurrentDeviceListeners(MyStreamDec
 
 	AudioObjectID deviceID = kAudioObjectUnknown;
 	UInt32 size = sizeof(deviceID);
-	AudioObjectPropertyAddress defaultOutputAddress = myStreamDeckDefaultOutputAddress();
-	OSStatus status = AudioObjectGetPropertyData(kAudioObjectSystemObject, &defaultOutputAddress, 0, NULL, &size, &deviceID);
+	AudioObjectPropertyAddress defaultAddress = myStreamDeckDefaultAddress(observer->kind);
+	OSStatus status = AudioObjectGetPropertyData(kAudioObjectSystemObject, &defaultAddress, 0, NULL, &size, &deviceID);
 	if (status != noErr || deviceID == kAudioObjectUnknown) {
 		return;
 	}
 
 	observer->currentDeviceID = deviceID;
 
-	AudioObjectPropertyAddress volumeAddress = myStreamDeckVolumeAddress();
-	AudioObjectPropertyAddress muteAddress = myStreamDeckMuteAddress();
-	AudioObjectPropertyAddress dataSourceAddress = myStreamDeckDataSourceAddress();
+	AudioObjectPropertyAddress volumeAddress = myStreamDeckVolumeAddress(observer->kind);
+	AudioObjectPropertyAddress muteAddress = myStreamDeckMuteAddress(observer->kind);
+	AudioObjectPropertyAddress dataSourceAddress = myStreamDeckDataSourceAddress(observer->kind);
 
 	if (AudioObjectAddPropertyListener(deviceID, &volumeAddress, myStreamDeckVolumePropertyListener, observer) == noErr) {
 		observer->hasVolumeListener = 1;
@@ -152,17 +164,18 @@ static void myStreamDeckVolumeObserverRegisterCurrentDeviceListeners(MyStreamDec
 	}
 }
 
-static MyStreamDeckVolumeObserver *myStreamDeckStartVolumeObserver(uintptr_t token) {
+static MyStreamDeckVolumeObserver *myStreamDeckStartVolumeObserver(uintptr_t token, int kind) {
 	MyStreamDeckVolumeObserver *observer = (MyStreamDeckVolumeObserver *)calloc(1, sizeof(MyStreamDeckVolumeObserver));
 	if (observer == NULL) {
 		return NULL;
 	}
 
 	observer->token = token;
+	observer->kind = kind;
 	observer->currentDeviceID = kAudioObjectUnknown;
 
-	AudioObjectPropertyAddress defaultOutputAddress = myStreamDeckDefaultOutputAddress();
-	if (AudioObjectAddPropertyListener(kAudioObjectSystemObject, &defaultOutputAddress, myStreamDeckVolumePropertyListener, observer) == noErr) {
+	AudioObjectPropertyAddress defaultAddress = myStreamDeckDefaultAddress(kind);
+	if (AudioObjectAddPropertyListener(kAudioObjectSystemObject, &defaultAddress, myStreamDeckVolumePropertyListener, observer) == noErr) {
 		observer->hasDefaultOutputListener = 1;
 	}
 
@@ -187,11 +200,11 @@ static void myStreamDeckStopVolumeObserver(MyStreamDeckVolumeObserver *observer)
 
 	myStreamDeckVolumeObserverUnregisterCurrentDeviceListeners(observer);
 
-	AudioObjectPropertyAddress defaultOutputAddress = myStreamDeckDefaultOutputAddress();
+	AudioObjectPropertyAddress defaultAddress = myStreamDeckDefaultAddress(observer->kind);
 	AudioObjectPropertyAddress serviceRestartAddress = myStreamDeckServiceRestartAddress();
 
 	if (observer->hasDefaultOutputListener) {
-		AudioObjectRemovePropertyListener(kAudioObjectSystemObject, &defaultOutputAddress, myStreamDeckVolumePropertyListener, observer);
+		AudioObjectRemovePropertyListener(kAudioObjectSystemObject, &defaultAddress, myStreamDeckVolumePropertyListener, observer);
 		observer->hasDefaultOutputListener = 0;
 	}
 	if (observer->hasServiceRestartListener) {
@@ -216,6 +229,14 @@ var (
 )
 
 func startVolumeObserver(fn func()) (func(), error) {
+	return startAudioEndpointObserver(audioEndpointOutput, fn)
+}
+
+func startInputObserver(fn func()) (func(), error) {
+	return startAudioEndpointObserver(audioEndpointInput, fn)
+}
+
+func startAudioEndpointObserver(kind audioEndpointKind, fn func()) (func(), error) {
 	if fn == nil {
 		return func() {}, nil
 	}
@@ -226,7 +247,7 @@ func startVolumeObserver(fn func()) (func(), error) {
 	volumeObserverHandlers[token] = fn
 	volumeObserverMu.Unlock()
 
-	observer := C.myStreamDeckStartVolumeObserver(C.uintptr_t(token))
+	observer := C.myStreamDeckStartVolumeObserver(C.uintptr_t(token), C.int(kind))
 	if observer == nil {
 		volumeObserverMu.Lock()
 		delete(volumeObserverHandlers, token)

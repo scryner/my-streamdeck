@@ -73,14 +73,23 @@ type volumeTouchFaces struct {
 	percent font.Face
 }
 
-type volumeSystemBackend struct {
+type audioSystemBackend struct {
 	mu sync.Mutex
 
 	cachedState     VolumeState
 	stateFetchedAt  time.Time
 	sourceFetchedAt time.Time
 	stopObserver    func()
+
+	startObserver func(func()) (func(), error)
+	readState     func(context.Context) (VolumeState, error)
+	readSource    func(context.Context) (string, error)
+	setVolume     func(context.Context, int) error
+	setMuted      func(context.Context, bool) error
+	normalizeName func(string) string
 }
+
+type volumeSystemBackend = audioSystemBackend
 
 type volumeBackendWithChangeHandler interface {
 	SetChangeHandler(func()) error
@@ -224,10 +233,17 @@ func (s *volumeTouchSource) notify() {
 }
 
 func newVolumeSystemBackend() *volumeSystemBackend {
-	return &volumeSystemBackend{}
+	return &volumeSystemBackend{
+		startObserver: startSystemVolumeObserver,
+		readState:     readSystemVolumeState,
+		readSource:    readSystemOutputSource,
+		setVolume:     setSystemOutputVolume,
+		setMuted:      setSystemOutputMuted,
+		normalizeName: normalizeAudioSourceName,
+	}
 }
 
-func (b *volumeSystemBackend) SetChangeHandler(fn func()) error {
+func (b *audioSystemBackend) SetChangeHandler(fn func()) error {
 	b.mu.Lock()
 	stop := b.stopObserver
 	b.stopObserver = nil
@@ -239,7 +255,7 @@ func (b *volumeSystemBackend) SetChangeHandler(fn func()) error {
 		return nil
 	}
 
-	stop, err := startSystemVolumeObserver(func() {
+	stop, err := b.startObserver(func() {
 		b.invalidateStateCache()
 		fn()
 	})
@@ -253,7 +269,7 @@ func (b *volumeSystemBackend) SetChangeHandler(fn func()) error {
 	return nil
 }
 
-func (b *volumeSystemBackend) Close() error {
+func (b *audioSystemBackend) Close() error {
 	b.mu.Lock()
 	stop := b.stopObserver
 	b.stopObserver = nil
@@ -264,14 +280,14 @@ func (b *volumeSystemBackend) Close() error {
 	return nil
 }
 
-func (b *volumeSystemBackend) invalidateStateCache() {
+func (b *audioSystemBackend) invalidateStateCache() {
 	b.mu.Lock()
 	b.stateFetchedAt = time.Time{}
 	b.sourceFetchedAt = time.Time{}
 	b.mu.Unlock()
 }
 
-func (b *volumeSystemBackend) State(ctx context.Context) (VolumeState, error) {
+func (b *audioSystemBackend) State(ctx context.Context) (VolumeState, error) {
 	now := time.Now()
 
 	b.mu.Lock()
@@ -300,7 +316,7 @@ func (b *volumeSystemBackend) State(ctx context.Context) (VolumeState, error) {
 	}
 
 	if !sourceFresh {
-		sourceName, err := b.fetchOutputSource(ctx)
+		sourceName, err := b.fetchAudioSource(ctx)
 		if err == nil && sourceName != "" {
 			b.mu.Lock()
 			b.cachedState.Source = sourceName
@@ -316,9 +332,9 @@ func (b *volumeSystemBackend) State(ctx context.Context) (VolumeState, error) {
 	return state, nil
 }
 
-func (b *volumeSystemBackend) SetVolume(ctx context.Context, percent int) error {
+func (b *audioSystemBackend) SetVolume(ctx context.Context, percent int) error {
 	percent = clampVolumePercent(percent)
-	if err := setSystemOutputVolume(ctx, percent); err != nil {
+	if err := b.setVolume(ctx, percent); err != nil {
 		return fmt.Errorf("set output volume: %w", err)
 	}
 
@@ -329,13 +345,13 @@ func (b *volumeSystemBackend) SetVolume(ctx context.Context, percent int) error 
 	return nil
 }
 
-func (b *volumeSystemBackend) ToggleMute(ctx context.Context) error {
+func (b *audioSystemBackend) ToggleMute(ctx context.Context) error {
 	state, err := b.State(ctx)
 	if err != nil {
 		return err
 	}
 
-	if err := setSystemOutputMuted(ctx, !state.Muted); err != nil {
+	if err := b.setMuted(ctx, !state.Muted); err != nil {
 		return fmt.Errorf("toggle output mute: %w", err)
 	}
 
@@ -346,19 +362,22 @@ func (b *volumeSystemBackend) ToggleMute(ctx context.Context) error {
 	return nil
 }
 
-func (b *volumeSystemBackend) fetchVolumeState(ctx context.Context) (VolumeState, error) {
-	return readSystemVolumeState(ctx)
+func (b *audioSystemBackend) fetchVolumeState(ctx context.Context) (VolumeState, error) {
+	return b.readState(ctx)
 }
 
-func (b *volumeSystemBackend) fetchOutputSource(ctx context.Context) (string, error) {
-	name, err := readSystemOutputSource(ctx)
+func (b *audioSystemBackend) fetchAudioSource(ctx context.Context) (string, error) {
+	name, err := b.readSource(ctx)
 	if err != nil {
 		return "", err
 	}
-	return normalizeOutputSourceName(name), nil
+	if b.normalizeName != nil {
+		return b.normalizeName(name), nil
+	}
+	return normalizeAudioSourceName(name), nil
 }
 
-func normalizeOutputSourceName(name string) string {
+func normalizeAudioSourceName(name string) string {
 	name = strings.ReplaceAll(name, "\u00a0", " ")
 	name = norm.NFC.String(name)
 	name = strings.TrimSpace(name)

@@ -212,7 +212,20 @@ func buildTouchWidgets(device *streamdeck.Device) ([]widgets.TouchWidget, error)
 		return nil, err
 	}
 
-	return []widgets.TouchWidget{volumeWidget}, nil
+	touchWidgets := []widgets.TouchWidget{volumeWidget}
+	if device.GetDialCount() >= 2 {
+		microphoneRect := decktouch.WIDGET_2.TouchStripRect(stripBounds)
+		microphoneWidget, err := widgets.NewMicrophoneTouchWidget(widgets.MicrophoneTouchWidgetOptions{
+			ID:   decktouch.WIDGET_2,
+			Size: microphoneRect.Size(),
+		})
+		if err != nil {
+			return nil, err
+		}
+		touchWidgets = append(touchWidgets, microphoneWidget)
+	}
+
+	return touchWidgets, nil
 }
 
 func buildButtonWidgets(cfg Config, configExists bool, maxKeys int) ([]widgets.ButtonWidget, map[streamdeck.KeyID]struct{}, error) {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/scryner/my-streamdeck/internal/deckbutton"
+	"github.com/scryner/my-streamdeck/internal/decktouch"
 	"github.com/scryner/my-streamdeck/internal/widgets"
 	"rafaelmartins.com/p/streamdeck"
 )
@@ -17,6 +18,7 @@ import (
 type Runtime struct {
 	device           *streamdeck.Device
 	controller       *deckbutton.Controller
+	touchController  *decktouch.Controller
 	stopCh           chan struct{}
 	doneCh           chan struct{}
 	unexpectedStopCh chan error
@@ -71,9 +73,38 @@ func StartRuntime() (*Runtime, error) {
 		return nil, err
 	}
 
+	touchWidgets, err := buildTouchWidgets(device)
+	if err != nil {
+		controller.Close()
+		_ = device.Close()
+		return nil, err
+	}
+
+	var touchController *decktouch.Controller
+	if len(touchWidgets) > 0 {
+		touchController, err = decktouch.NewController(device)
+		if err != nil {
+			controller.Close()
+			_ = device.Close()
+			return nil, err
+		}
+
+		touchDefs := make([]decktouch.Widget, 0, len(touchWidgets))
+		for _, touchWidget := range touchWidgets {
+			touchDefs = append(touchDefs, touchWidget.Touch())
+		}
+		if err := touchController.RegisterWidgets(touchDefs...); err != nil {
+			touchController.Close()
+			controller.Close()
+			_ = device.Close()
+			return nil, err
+		}
+	}
+
 	rt := &Runtime{
 		device:           device,
 		controller:       controller,
+		touchController:  touchController,
 		stopCh:           make(chan struct{}),
 		doneCh:           make(chan struct{}),
 		unexpectedStopCh: make(chan error, 1),
@@ -139,6 +170,9 @@ func (r *Runtime) listen() {
 func (r *Runtime) Close() {
 	r.closeOnce.Do(func() {
 		close(r.stopCh)
+		if r.touchController != nil {
+			r.touchController.Close()
+		}
 		if r.controller != nil {
 			r.controller.Close()
 		}
@@ -157,6 +191,28 @@ func (r *Runtime) Close() {
 
 func (r *Runtime) UnexpectedStop() <-chan error {
 	return r.unexpectedStopCh
+}
+
+func buildTouchWidgets(device *streamdeck.Device) ([]widgets.TouchWidget, error) {
+	if !device.GetTouchStripSupported() || device.GetDialCount() == 0 {
+		return nil, nil
+	}
+
+	stripBounds, err := device.GetTouchStripImageRectangle()
+	if err != nil {
+		return nil, fmt.Errorf("get touch strip bounds: %w", err)
+	}
+
+	volumeRect := decktouch.WIDGET_1.TouchStripRect(stripBounds)
+	volumeWidget, err := widgets.NewVolumeTouchWidget(widgets.VolumeTouchWidgetOptions{
+		ID:   decktouch.WIDGET_1,
+		Size: volumeRect.Size(),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return []widgets.TouchWidget{volumeWidget}, nil
 }
 
 func buildButtonWidgets(cfg Config, configExists bool, maxKeys int) ([]widgets.ButtonWidget, map[streamdeck.KeyID]struct{}, error) {

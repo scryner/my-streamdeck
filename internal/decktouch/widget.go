@@ -35,8 +35,9 @@ type SwipeHandler func(d *streamdeck.Device, w *Widget, origin image.Point, dest
 // DialPressHandler is called when the widget's mapped dial is pressed.
 type DialPressHandler func(d *streamdeck.Device, w *Widget, dial *streamdeck.Dial) error
 
-// DialRotateHandler is called when the widget's mapped dial is rotated.
-type DialRotateHandler func(d *streamdeck.Device, w *Widget, dial *streamdeck.Dial, delta int8) error
+// DialRotateHandler is called after a short batching window when the widget's
+// mapped dial rotation has settled. steps is the accumulated rotation count.
+type DialRotateHandler func(d *streamdeck.Device, w *Widget, dial *streamdeck.Dial, steps int) error
 
 // Widget represents one quarter of the touch strip and its paired dial.
 type Widget struct {

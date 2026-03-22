@@ -248,6 +248,7 @@ func drawMicrophoneIcon(dst *image.RGBA, x, y, size int, c color.RGBA, muted boo
 	drawLineWidth(dst, centerX-sz*0.18, bottomY+sz*0.24, centerX+sz*0.18, bottomY+sz*0.24, math.Max(2.5, sz*0.08), c)
 
 	if muted {
-		drawLineWidth(dst, float64(x)+sz*0.08, float64(y)+sz*0.86, float64(x)+sz*0.84, float64(y)+sz*0.10, math.Max(3.0, sz*0.09), c)
+		muteSlash := color.RGBA{R: 255, G: 92, B: 92, A: 255}
+		drawLineWidth(dst, float64(x)+sz*0.08, float64(y)+sz*0.86, float64(x)+sz*0.84, float64(y)+sz*0.10, math.Max(3.0, sz*0.09), muteSlash)
 	}
 }

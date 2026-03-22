@@ -474,8 +474,9 @@ func drawVolumeSpeakerIcon(dst *image.RGBA, x, y, size int, c color.RGBA, muted 
 	centerY := float64(y) + sz*0.5
 	lineWidth := math.Max(2.5, sz*0.08)
 	if muted {
-		drawLineWidth(dst, centerX+sz*0.08, centerY-sz*0.26, centerX+sz*0.36, centerY+sz*0.26, lineWidth, c)
-		drawLineWidth(dst, centerX+sz*0.36, centerY-sz*0.26, centerX+sz*0.08, centerY+sz*0.26, lineWidth, c)
+		muteCross := color.RGBA{R: 255, G: 92, B: 92, A: 255}
+		drawLineWidth(dst, centerX+sz*0.08, centerY-sz*0.26, centerX+sz*0.36, centerY+sz*0.26, lineWidth, muteCross)
+		drawLineWidth(dst, centerX+sz*0.36, centerY-sz*0.26, centerX+sz*0.08, centerY+sz*0.26, lineWidth, muteCross)
 		return
 	}
 

@@ -18,14 +18,20 @@ const (
 )
 
 type Config struct {
-	Widgets  []WidgetConfig      `yaml:"widgets"`
-	Settings []map[string]string `yaml:"settings"`
+	ButtonWidgets []ButtonWidgetConfig `yaml:"button_widgets"`
+	TouchWidgets  []TouchWidgetConfig  `yaml:"touch_widgets"`
+	LegacyWidgets []ButtonWidgetConfig `yaml:"widgets"`
+	Settings      []map[string]string  `yaml:"settings"`
 }
 
-type WidgetConfig struct {
+type ButtonWidgetConfig struct {
 	Type      string `yaml:"type"`
 	First     string `yaml:"first,omitempty"`
 	Interface string `yaml:"interface,omitempty"`
+}
+
+type TouchWidgetConfig struct {
+	Type string `yaml:"type"`
 }
 
 func ConfigDir() (string, error) {
@@ -54,11 +60,17 @@ func TemplatePath() (string, error) {
 
 func DefaultConfig() Config {
 	return Config{
-		Widgets: []WidgetConfig{
+		ButtonWidgets: []ButtonWidgetConfig{
 			{Type: "clock", First: "analog"},
 			{Type: "calendar"},
 			{Type: "sysstat"},
 			{Type: "caffeinate"},
+		},
+		TouchWidgets: []TouchWidgetConfig{
+			{Type: "playback"},
+			{Type: "brightness"},
+			{Type: "microphone"},
+			{Type: "volume"},
 		},
 	}
 }
@@ -80,6 +92,9 @@ func LoadConfig() (Config, bool, error) {
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, true, fmt.Errorf("parse config file: %w", err)
+	}
+	if len(cfg.ButtonWidgets) == 0 && len(cfg.LegacyWidgets) > 0 {
+		cfg.ButtonWidgets = append([]ButtonWidgetConfig(nil), cfg.LegacyWidgets...)
 	}
 
 	return cfg, true, nil
@@ -116,7 +131,7 @@ func WriteTemplate() (string, error) {
 	return path, nil
 }
 
-const configTemplate = `widgets:
+const configTemplate = `button_widgets:
   - type: clock
     first: analog
   - type: calendar
@@ -127,6 +142,11 @@ const configTemplate = `widgets:
   - type: weather.forecast
   - type: caffeinate
   - type: qui
+touch_widgets:
+  - type: playback
+  - type: brightness
+  - type: microphone
+  - type: volume
 settings:
   - brightness: "100"
   - weather.location: INPUT-YOUR-WEATHER-LOCATION

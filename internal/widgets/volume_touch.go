@@ -407,11 +407,11 @@ func normalizeOutputSourceName(name string) string {
 func loadVolumeTouchFaces(size image.Point) (volumeTouchFaces, error) {
 	scale := math.Min(float64(size.X)/200.0, float64(size.Y)/100.0)
 
-	title, err := newFace(gobold.TTF, 15*scale)
+	title, err := newFace(gobold.TTF, 16*scale)
 	if err != nil {
 		return volumeTouchFaces{}, fmt.Errorf("load volume touch title font: %w", err)
 	}
-	percent, err := newFace(gobold.TTF, 27*scale)
+	percent, err := newFace(gobold.TTF, 29*scale)
 	if err != nil {
 		_ = title.Close()
 		return volumeTouchFaces{}, fmt.Errorf("load volume touch percent font: %w", err)
@@ -425,18 +425,18 @@ func loadVolumeTouchFaces(size image.Point) (volumeTouchFaces, error) {
 
 func (s *volumeTouchSource) render(dst *image.RGBA, state VolumeState) {
 	sourceText := ellipsizeText(s.faces.title, state.Source, float64(dst.Bounds().Dx()-12))
-	drawCenteredText(dst, s.faces.title, sourceText, float64(dst.Bounds().Dx())/2, 19, color.RGBA{R: 248, G: 248, B: 249, A: 255})
+	drawCenteredText(dst, s.faces.title, sourceText, float64(dst.Bounds().Dx())/2, 20, color.RGBA{R: 248, G: 248, B: 249, A: 255})
 
 	iconColor := color.RGBA{R: 248, G: 248, B: 249, A: 255}
-	drawVolumeSpeakerIcon(dst, 18, 30, 42, iconColor, state.Muted)
+	drawVolumeSpeakerIcon(dst, 18, 47, 34, iconColor, state.Muted)
 
 	percentText := fmt.Sprintf("%d%%", clampVolumePercent(state.Volume))
-	drawCenteredText(dst, s.faces.percent, percentText, float64(dst.Bounds().Dx()-48), centeredTextBaselineY(s.faces.percent, 46), color.RGBA{R: 248, G: 248, B: 249, A: 255})
+	drawCenteredText(dst, s.faces.percent, percentText, float64(dst.Bounds().Dx()-46), centeredTextBaselineY(s.faces.percent, 50), color.RGBA{R: 248, G: 248, B: 249, A: 255})
 
-	trackX := 78
-	trackY := 74
-	trackWidth := dst.Bounds().Dx() - trackX - 12
-	trackHeight := 10
+	trackX := 72
+	trackY := 80
+	trackWidth := dst.Bounds().Dx() - trackX - 10
+	trackHeight := 12
 	drawVolumeSlider(dst, trackX, trackY, trackWidth, trackHeight, float64(clampVolumePercent(state.Volume))/100.0)
 }
 
@@ -461,26 +461,28 @@ func ellipsizeText(face font.Face, text string, maxWidth float64) string {
 }
 
 func drawVolumeSpeakerIcon(dst *image.RGBA, x, y, size int, c color.RGBA, muted bool) {
+	sz := float64(size)
 	body := []polygonPoint{
-		{x: float64(x), y: float64(y + size/3)},
-		{x: float64(x + size/5), y: float64(y + size/3)},
-		{x: float64(x + size/2), y: float64(y)},
-		{x: float64(x + size/2), y: float64(y + size)},
-		{x: float64(x + size/5), y: float64(y + (size * 2 / 3))},
-		{x: float64(x), y: float64(y + (size * 2 / 3))},
+		{x: float64(x), y: float64(y) + sz*0.35},
+		{x: float64(x) + sz*0.18, y: float64(y) + sz*0.35},
+		{x: float64(x) + sz*0.48, y: float64(y) + sz*0.08},
+		{x: float64(x) + sz*0.48, y: float64(y) + sz*0.92},
+		{x: float64(x) + sz*0.18, y: float64(y) + sz*0.65},
+		{x: float64(x), y: float64(y) + sz*0.65},
 	}
 	drawPolygonFill(dst, body, c)
 
-	centerX := float64(x + size/2 + 3)
-	centerY := float64(y + size/2)
+	centerX := float64(x) + sz*0.52
+	centerY := float64(y) + sz*0.5
+	lineWidth := math.Max(2.5, sz*0.08)
 	if muted {
-		drawLineWidth(dst, centerX+4, centerY-14, centerX+22, centerY+14, 4, c)
-		drawLineWidth(dst, centerX+22, centerY-14, centerX+4, centerY+14, 4, c)
+		drawLineWidth(dst, centerX+sz*0.08, centerY-sz*0.26, centerX+sz*0.36, centerY+sz*0.26, lineWidth, c)
+		drawLineWidth(dst, centerX+sz*0.36, centerY-sz*0.26, centerX+sz*0.08, centerY+sz*0.26, lineWidth, c)
 		return
 	}
 
-	drawEllipseArc(dst, centerX+10, centerY, 8, 12, -0.38*math.Pi, 0.38*math.Pi, 3, c)
-	drawEllipseArc(dst, centerX+19, centerY, 14, 20, -0.38*math.Pi, 0.38*math.Pi, 3, c)
+	drawEllipseArc(dst, centerX+sz*0.14, centerY, sz*0.15, sz*0.24, -0.38*math.Pi, 0.38*math.Pi, lineWidth, c)
+	drawEllipseArc(dst, centerX+sz*0.28, centerY, sz*0.27, sz*0.40, -0.38*math.Pi, 0.38*math.Pi, lineWidth, c)
 }
 
 func drawVolumeSlider(dst *image.RGBA, x, y, width, height int, progress float64) {

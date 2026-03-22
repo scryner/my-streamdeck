@@ -21,14 +21,16 @@ const sysstatWidgetFrameRate = 1
 type SysstatProvider func(ctx context.Context) (cpuPercent float64, memoryPercent float64, err error)
 
 type SysstatWidgetOptions struct {
-	Key   streamdeck.KeyID
-	Size  int
-	Stats SysstatProvider
+	Key     streamdeck.KeyID
+	Size    int
+	Stats   SysstatProvider
+	OpenApp ActivityMonitorOpenFunc
 }
 
 type SysstatWidget struct {
-	key    streamdeck.KeyID
-	source *sysstatSource
+	key     streamdeck.KeyID
+	source  *sysstatSource
+	openApp func(context.Context) error
 }
 
 type sysstatSource struct {
@@ -48,6 +50,9 @@ func NewSysstatWidget(options SysstatWidgetOptions) (*SysstatWidget, error) {
 	if options.Stats == nil {
 		options.Stats = defaultSysstatProvider
 	}
+	if options.OpenApp == nil {
+		options.OpenApp = openActivityMonitorCPU
+	}
 
 	faces, err := loadSysstatFaces(options.Size)
 	if err != nil {
@@ -55,7 +60,8 @@ func NewSysstatWidget(options SysstatWidgetOptions) (*SysstatWidget, error) {
 	}
 
 	return &SysstatWidget{
-		key: options.Key,
+		key:     options.Key,
+		openApp: options.OpenApp,
 		source: &sysstatSource{
 			size:  options.Size,
 			stats: options.Stats,
@@ -71,6 +77,11 @@ func (w *SysstatWidget) Button() deckbutton.Button {
 			Source:    w.source,
 			FrameRate: sysstatWidgetFrameRate,
 			Loop:      true,
+		},
+		OnPress: func(_ *streamdeck.Device, _ *streamdeck.Key) error {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			return w.openApp(ctx)
 		},
 	}
 }

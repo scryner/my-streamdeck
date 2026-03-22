@@ -31,6 +31,9 @@ func TestSysstatWidgetRendersExpectedBounds(t *testing.T) {
 	if button.Animation.FrameRate != sysstatWidgetFrameRate {
 		t.Fatalf("expected frame rate %d, got %d", sysstatWidgetFrameRate, button.Animation.FrameRate)
 	}
+	if button.OnPress == nil {
+		t.Fatal("expected sysstat widget to provide OnPress handler")
+	}
 
 	frame, err := button.Animation.Source.FrameAt(context.Background(), 0)
 	if err != nil {
@@ -66,6 +69,36 @@ func TestSysstatWidgetRendersExpectedBounds(t *testing.T) {
 	}
 	if lowerForegroundPixels == 0 {
 		t.Fatal("expected memory usage rendering in lower half of sysstat widget")
+	}
+}
+
+func TestSysstatWidgetButtonOpensActivityMonitor(t *testing.T) {
+	t.Parallel()
+
+	called := 0
+	widget, err := NewSysstatWidget(SysstatWidgetOptions{
+		Key: streamdeck.KEY_3,
+		Stats: func(context.Context) (float64, float64, error) {
+			return 42.6, 67.1, nil
+		},
+		OpenApp: func(context.Context) error {
+			called++
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewSysstatWidget: %v", err)
+	}
+
+	button := widget.Button()
+	if button.OnPress == nil {
+		t.Fatal("expected sysstat widget to provide OnPress handler")
+	}
+	if err := button.OnPress(nil, nil); err != nil {
+		t.Fatalf("OnPress: %v", err)
+	}
+	if called != 1 {
+		t.Fatalf("expected opener to be called once, got %d", called)
 	}
 }
 

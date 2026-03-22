@@ -40,6 +40,9 @@ func TestNetstatWidgetRendersExpectedBounds(t *testing.T) {
 	if button.Animation.FrameRate != netstatWidgetFrameRate {
 		t.Fatalf("expected frame rate %d, got %d", netstatWidgetFrameRate, button.Animation.FrameRate)
 	}
+	if button.OnPress == nil {
+		t.Fatal("expected netstat widget to provide OnPress handler")
+	}
 
 	frame, err := button.Animation.Source.FrameAt(context.Background(), 0)
 	if err != nil {
@@ -90,6 +93,37 @@ func TestNetstatWidgetRendersExpectedBounds(t *testing.T) {
 	}
 	if bottomPixels == 0 {
 		t.Fatal("expected interface label rendering in the third row")
+	}
+}
+
+func TestNetstatWidgetButtonOpensActivityMonitor(t *testing.T) {
+	t.Parallel()
+
+	called := 0
+	widget, err := NewNetstatWidget(NetstatWidgetOptions{
+		Key:       streamdeck.KEY_4,
+		Interface: "en0",
+		Stats: func(context.Context, string) (uint64, uint64, error) {
+			return 0, 0, nil
+		},
+		OpenApp: func(context.Context) error {
+			called++
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewNetstatWidget: %v", err)
+	}
+
+	button := widget.Button()
+	if button.OnPress == nil {
+		t.Fatal("expected netstat widget to provide OnPress handler")
+	}
+	if err := button.OnPress(nil, nil); err != nil {
+		t.Fatalf("OnPress: %v", err)
+	}
+	if called != 1 {
+		t.Fatalf("expected opener to be called once, got %d", called)
 	}
 }
 

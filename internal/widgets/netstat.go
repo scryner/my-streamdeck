@@ -27,11 +27,13 @@ type NetstatWidgetOptions struct {
 	Interface string
 	Stats     NetstatCounterProvider
 	Now       func() time.Time
+	OpenApp   ActivityMonitorOpenFunc
 }
 
 type NetstatWidget struct {
-	key    streamdeck.KeyID
-	source *netstatSource
+	key     streamdeck.KeyID
+	source  *netstatSource
+	openApp ActivityMonitorOpenFunc
 }
 
 type netstatSource struct {
@@ -72,6 +74,9 @@ func NewNetstatWidget(options NetstatWidgetOptions) (*NetstatWidget, error) {
 	if options.Now == nil {
 		options.Now = time.Now
 	}
+	if options.OpenApp == nil {
+		options.OpenApp = openActivityMonitorNetwork
+	}
 
 	faces, err := loadNetstatFaces(options.Size)
 	if err != nil {
@@ -79,7 +84,8 @@ func NewNetstatWidget(options NetstatWidgetOptions) (*NetstatWidget, error) {
 	}
 
 	return &NetstatWidget{
-		key: options.Key,
+		key:     options.Key,
+		openApp: options.OpenApp,
 		source: &netstatSource{
 			size:  options.Size,
 			iface: options.Interface,
@@ -97,6 +103,11 @@ func (w *NetstatWidget) Button() deckbutton.Button {
 			Source:    w.source,
 			FrameRate: netstatWidgetFrameRate,
 			Loop:      true,
+		},
+		OnPress: func(_ *streamdeck.Device, _ *streamdeck.Key) error {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			return w.openApp(ctx)
 		},
 	}
 }

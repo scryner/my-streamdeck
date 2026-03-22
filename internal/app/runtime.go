@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"image"
 	"image/color"
 	"log"
 	"strconv"
@@ -73,7 +74,7 @@ func StartRuntime() (*Runtime, error) {
 		return nil, err
 	}
 
-	touchWidgets, err := buildTouchWidgets(device)
+	touchWidgets, err := buildTouchWidgets(cfg, device)
 	if err != nil {
 		controller.Close()
 		_ = device.Close()
@@ -193,7 +194,7 @@ func (r *Runtime) UnexpectedStop() <-chan error {
 	return r.unexpectedStopCh
 }
 
-func buildTouchWidgets(device *streamdeck.Device) ([]widgets.TouchWidget, error) {
+func buildTouchWidgets(cfg Config, device *streamdeck.Device) ([]widgets.TouchWidget, error) {
 	if !device.GetTouchStripSupported() || device.GetDialCount() == 0 {
 		return nil, nil
 	}
@@ -203,51 +204,63 @@ func buildTouchWidgets(device *streamdeck.Device) ([]widgets.TouchWidget, error)
 		return nil, fmt.Errorf("get touch strip bounds: %w", err)
 	}
 
-	volumeRect := decktouch.WIDGET_1.TouchStripRect(stripBounds)
-	volumeWidget, err := widgets.NewVolumeTouchWidget(widgets.VolumeTouchWidgetOptions{
-		ID:   decktouch.WIDGET_1,
-		Size: volumeRect.Size(),
-	})
-	if err != nil {
-		return nil, err
+	touchWidgetDefs := cfg.TouchWidgets
+	if len(touchWidgetDefs) == 0 {
+		touchWidgetDefs = DefaultConfig().TouchWidgets
 	}
 
-	touchWidgets := []widgets.TouchWidget{volumeWidget}
-	if device.GetDialCount() >= 2 {
-		microphoneRect := decktouch.WIDGET_2.TouchStripRect(stripBounds)
-		microphoneWidget, err := widgets.NewMicrophoneTouchWidget(widgets.MicrophoneTouchWidgetOptions{
-			ID:   decktouch.WIDGET_2,
-			Size: microphoneRect.Size(),
-		})
-		if err != nil {
-			return nil, err
-		}
-		touchWidgets = append(touchWidgets, microphoneWidget)
+	maxTouchWidgets := minInt(4, int(device.GetDialCount()))
+	touchWidgets := make([]widgets.TouchWidget, 0, minInt(maxTouchWidgets, len(touchWidgetDefs)))
+	ids := []decktouch.WidgetID{
+		decktouch.WIDGET_1,
+		decktouch.WIDGET_2,
+		decktouch.WIDGET_3,
+		decktouch.WIDGET_4,
 	}
-	if device.GetDialCount() >= 3 {
-		brightnessRect := decktouch.WIDGET_3.TouchStripRect(stripBounds)
-		brightnessWidget, err := widgets.NewBrightnessTouchWidget(widgets.BrightnessTouchWidgetOptions{
-			ID:   decktouch.WIDGET_3,
-			Size: brightnessRect.Size(),
-		})
-		if err != nil {
-			return nil, err
+	for _, def := range touchWidgetDefs {
+		if len(touchWidgets) >= maxTouchWidgets {
+			log.Printf("ignoring extra touch widget %q: device only supports %d touch widget slots", def.Type, maxTouchWidgets)
+			break
 		}
-		touchWidgets = append(touchWidgets, brightnessWidget)
-	}
-	if device.GetDialCount() >= 4 {
-		playRect := decktouch.WIDGET_4.TouchStripRect(stripBounds)
-		playWidget, err := widgets.NewPlayTouchWidget(widgets.PlayTouchWidgetOptions{
-			ID:   decktouch.WIDGET_4,
-			Size: playRect.Size(),
-		})
+
+		id := ids[len(touchWidgets)]
+		rect := id.TouchStripRect(stripBounds)
+		touchWidget, err := buildTouchWidget(def, id, rect.Size())
 		if err != nil {
-			return nil, err
+			log.Printf("skip touch widget %q: %v", def.Type, err)
+			continue
 		}
-		touchWidgets = append(touchWidgets, playWidget)
+		touchWidgets = append(touchWidgets, touchWidget)
 	}
 
 	return touchWidgets, nil
+}
+
+func buildTouchWidget(def TouchWidgetConfig, id decktouch.WidgetID, size image.Point) (widgets.TouchWidget, error) {
+	switch def.Type {
+	case "volume":
+		return widgets.NewVolumeTouchWidget(widgets.VolumeTouchWidgetOptions{
+			ID:   id,
+			Size: size,
+		})
+	case "microphone":
+		return widgets.NewMicrophoneTouchWidget(widgets.MicrophoneTouchWidgetOptions{
+			ID:   id,
+			Size: size,
+		})
+	case "brightness":
+		return widgets.NewBrightnessTouchWidget(widgets.BrightnessTouchWidgetOptions{
+			ID:   id,
+			Size: size,
+		})
+	case "playback":
+		return widgets.NewPlayTouchWidget(widgets.PlayTouchWidgetOptions{
+			ID:   id,
+			Size: size,
+		})
+	default:
+		return nil, fmt.Errorf("unknown touch widget type %q", def.Type)
+	}
 }
 
 func buildButtonWidgets(cfg Config, configExists bool, maxKeys int) ([]widgets.ButtonWidget, map[streamdeck.KeyID]struct{}, error) {

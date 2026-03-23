@@ -16,11 +16,10 @@ import (
 )
 
 const (
-	playTouchUpdateInterval = time.Second
-	playStateCacheTTL       = 500 * time.Millisecond
-	playCommandTimeout      = 2 * time.Second
-	playSkipDebounceWindow  = 200 * time.Millisecond
-	defaultPlayerLabel      = "Playback"
+	playStateCacheTTL      = 500 * time.Millisecond
+	playCommandTimeout     = 2 * time.Second
+	playSkipDebounceWindow = 200 * time.Millisecond
+	defaultPlayerLabel     = "Playback"
 )
 
 var (
@@ -123,9 +122,8 @@ func NewPlayTouchWidget(options PlayTouchWidgetOptions) (*PlayTouchWidget, error
 	}
 
 	touch.Animation = &decktouch.Animation{
-		Source:         source,
-		UpdateInterval: playTouchUpdateInterval,
-		Loop:           true,
+		Source: source,
+		Loop:   true,
 	}
 
 	widget := &PlayTouchWidget{
@@ -221,6 +219,12 @@ func (s *playTouchSource) FrameAt(context.Context, time.Duration) (image.Image, 
 	img := image.NewRGBA(image.Rect(0, 0, s.size.X, s.size.Y))
 	s.render(img)
 	return img, nil
+}
+
+func (s *playTouchSource) StateSignature(context.Context, time.Duration) (uint64, error) {
+	sum := newStateHash()
+	sum = addStateHashInt(sum, int(s.currentVisualMode()))
+	return sum, nil
 }
 
 func (s *playTouchSource) Duration() time.Duration {

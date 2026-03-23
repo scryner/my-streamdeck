@@ -223,6 +223,39 @@ func (s *caffeinateSource) FrameAt(ctx context.Context, _ time.Duration) (image.
 	return img, nil
 }
 
+func (s *caffeinateSource) StateSignature(ctx context.Context, _ time.Duration) (uint64, error) {
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	default:
+	}
+
+	now := s.now()
+	displayProgress := easeOutProgress(s.holdProgress(now))
+	fillStartY := s.size
+	if displayProgress > 0 {
+		fillStartY = int(math.Round(float64(s.size) * (1 - displayProgress)))
+	}
+
+	enabled := false
+	if s.state != nil {
+		enabled = s.state.Enabled()
+	}
+
+	sum := newStateHash()
+	sum = addStateHashBool(sum, enabled)
+	sum = addStateHashInt(sum, fillStartY)
+
+	if enabledAt, ok := s.enabledSince(); ok {
+		sum = addStateHashBool(sum, true)
+		sum = addStateHashInt64(sum, int64(now.Sub(enabledAt)/time.Second))
+	} else {
+		sum = addStateHashBool(sum, false)
+	}
+
+	return sum, nil
+}
+
 func (s *caffeinateSource) Duration() time.Duration {
 	return 0
 }

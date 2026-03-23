@@ -167,6 +167,20 @@ func (s *clockSource) FrameAt(ctx context.Context, _ time.Duration) (image.Image
 	return img, nil
 }
 
+func (s *clockSource) StateSignature(ctx context.Context, _ time.Duration) (uint64, error) {
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	default:
+	}
+
+	now := s.now().In(s.location)
+	sum := newStateHash()
+	sum = addStateHashInt(sum, int(s.Mode()))
+	sum = addStateHashInt64(sum, now.Truncate(time.Second).Unix())
+	return sum, nil
+}
+
 func (s *clockSource) Duration() time.Duration {
 	return 0
 }

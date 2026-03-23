@@ -181,6 +181,24 @@ func (s *quiSource) FrameAt(ctx context.Context, _ time.Duration) (image.Image, 
 	return img, nil
 }
 
+func (s *quiSource) StateSignature(ctx context.Context, _ time.Duration) (uint64, error) {
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	default:
+	}
+
+	snapshot := s.cachedSnapshot()
+	sum := newStateHash()
+	sum = addStateHashBool(sum, s.hasSnapshot())
+	sum = addStateHashBool(sum, s.isSignalLost())
+	sum = addStateHashBool(sum, s.shouldRefresh())
+	sum = addStateHashInt(sum, snapshot.Downloading)
+	sum = addStateHashInt(sum, snapshot.Completed)
+	sum = addStateHashInt(sum, snapshot.Seeding)
+	return sum, nil
+}
+
 func (s *quiSource) Duration() time.Duration {
 	return 0
 }

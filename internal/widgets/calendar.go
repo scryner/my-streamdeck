@@ -112,6 +112,20 @@ func (s *calendarSource) FrameAt(ctx context.Context, _ time.Duration) (image.Im
 	return img, nil
 }
 
+func (s *calendarSource) StateSignature(ctx context.Context, _ time.Duration) (uint64, error) {
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	default:
+	}
+
+	now := s.now().In(s.location)
+	sum := newStateHash()
+	sum = addStateHashInt(sum, now.Year())
+	sum = addStateHashInt(sum, now.YearDay())
+	return sum, nil
+}
+
 func (s *calendarSource) Duration() time.Duration {
 	return 0
 }

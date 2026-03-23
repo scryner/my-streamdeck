@@ -23,7 +23,7 @@ type Controller struct {
 	cancel context.CancelFunc
 
 	setImageMu sync.Mutex
-	lastFrame  map[WidgetID]frameSignature
+	lastFrame  map[WidgetID]renderRecord
 	widgets    map[WidgetID]*Widget
 	wg         sync.WaitGroup
 }
@@ -31,6 +31,12 @@ type Controller struct {
 type frameSignature struct {
 	bounds image.Rectangle
 	sum    uint64
+}
+
+type renderRecord struct {
+	image    frameSignature
+	state    uint64
+	hasState bool
 }
 
 type dialRotateEvent struct {
@@ -51,7 +57,7 @@ func NewController(device *streamdeck.Device) (*Controller, error) {
 		bounds:    bounds,
 		ctx:       ctx,
 		cancel:    cancel,
-		lastFrame: map[WidgetID]frameSignature{},
+		lastFrame: map[WidgetID]renderRecord{},
 		widgets:   map[WidgetID]*Widget{},
 	}, nil
 }
@@ -107,7 +113,7 @@ func (c *Controller) RegisterWidgets(widgets ...Widget) error {
 		if widget.Animation.Source == nil {
 			return fmt.Errorf("animation source is required for %s", widget.ID)
 		}
-		if widget.Animation.FrameRate <= 0 && widget.Animation.UpdateInterval <= 0 {
+		if !animationHasSchedule(widget.Animation) {
 			return fmt.Errorf("animation frame rate or update interval is required for %s", widget.ID)
 		}
 
@@ -209,7 +215,7 @@ func (c *Controller) Close() {
 	c.cancel()
 	c.wg.Wait()
 	c.setImageMu.Lock()
-	c.lastFrame = map[WidgetID]frameSignature{}
+	c.lastFrame = map[WidgetID]renderRecord{}
 	c.setImageMu.Unlock()
 }
 
@@ -360,6 +366,33 @@ func (c *Controller) runFixedAnimation(widget Widget) error {
 }
 
 func (c *Controller) renderFrame(id WidgetID, source deckbutton.FrameSource, elapsed time.Duration) error {
+	if stateSig, ok, err := sourceStateSignature(c.ctx, source, elapsed); err != nil {
+		return err
+	} else if ok {
+		c.setImageMu.Lock()
+		prev, found := c.lastFrame[id]
+		c.setImageMu.Unlock()
+		if found && prev.hasState && prev.state == stateSig {
+			return nil
+		}
+
+		img, err := source.FrameAt(c.ctx, elapsed)
+		if err != nil {
+			return err
+		}
+		if postSig, postOK, postErr := sourceStateSignature(c.ctx, source, elapsed); postErr == nil && postOK {
+			stateSig = postSig
+		}
+
+		c.setImageMu.Lock()
+		defer c.setImageMu.Unlock()
+		if err := c.device.SetTouchStripImageWithRectangle(img, id.TouchStripRect(c.bounds)); err != nil {
+			return err
+		}
+		c.lastFrame[id] = renderRecord{hasState: true, state: stateSig}
+		return nil
+	}
+
 	img, err := source.FrameAt(c.ctx, elapsed)
 	if err != nil {
 		return err
@@ -368,14 +401,42 @@ func (c *Controller) renderFrame(id WidgetID, source deckbutton.FrameSource, ela
 	c.setImageMu.Lock()
 	defer c.setImageMu.Unlock()
 	sig := imageSignature(img)
-	if prev, ok := c.lastFrame[id]; ok && prev == sig {
+	if prev, ok := c.lastFrame[id]; ok && !prev.hasState && prev.image == sig {
 		return nil
 	}
 	if err := c.device.SetTouchStripImageWithRectangle(img, id.TouchStripRect(c.bounds)); err != nil {
 		return err
 	}
-	c.lastFrame[id] = sig
+	c.lastFrame[id] = renderRecord{image: sig}
 	return nil
+}
+
+func animationHasSchedule(anim *Animation) bool {
+	if anim == nil || anim.Source == nil {
+		return false
+	}
+	if anim.FrameRate > 0 || anim.UpdateInterval > 0 {
+		return true
+	}
+	if _, ok := anim.Source.(deckbutton.FrameSourceWithDynamicDelay); ok {
+		return true
+	}
+	if _, ok := anim.Source.(deckbutton.FrameSourceWithUpdates); ok {
+		return true
+	}
+	return false
+}
+
+func sourceStateSignature(ctx context.Context, source deckbutton.FrameSource, elapsed time.Duration) (uint64, bool, error) {
+	s, ok := source.(deckbutton.FrameSourceWithStateSignature)
+	if !ok {
+		return 0, false, nil
+	}
+	sig, err := s.StateSignature(ctx, elapsed)
+	if err != nil {
+		return 0, false, err
+	}
+	return sig, true, nil
 }
 
 func nextFrameDelay(anim *Animation) time.Duration {
@@ -384,6 +445,9 @@ func nextFrameDelay(anim *Animation) time.Duration {
 	}
 	if anim.UpdateInterval > 0 {
 		return anim.UpdateInterval
+	}
+	if anim.FrameRate <= 0 {
+		return 0
 	}
 	return time.Second / time.Duration(anim.FrameRate)
 }
@@ -405,6 +469,15 @@ func imageSignature(img image.Image) frameSignature {
 		sum:    1469598103934665603,
 	}
 
+	switch src := img.(type) {
+	case *image.RGBA:
+		hashRGBABytes(&sig, src.Pix, src.Stride, sig.bounds.Dx(), sig.bounds.Dy())
+		return sig
+	case *image.NRGBA:
+		hashRGBABytes(&sig, src.Pix, src.Stride, sig.bounds.Dx(), sig.bounds.Dy())
+		return sig
+	}
+
 	for y := sig.bounds.Min.Y; y < sig.bounds.Max.Y; y++ {
 		for x := sig.bounds.Min.X; x < sig.bounds.Max.X; x++ {
 			r, g, b, a := img.At(x, y).RGBA()
@@ -416,6 +489,19 @@ func imageSignature(img image.Image) frameSignature {
 	}
 
 	return sig
+}
+
+func hashRGBABytes(sig *frameSignature, pix []uint8, stride int, width int, height int) {
+	if width <= 0 || height <= 0 {
+		return
+	}
+	rowBytes := width * 4
+	for y := 0; y < height; y++ {
+		row := pix[y*stride : y*stride+rowBytes]
+		for _, b := range row {
+			sig.sum = fnv1a64(sig.sum, uint64(b))
+		}
+	}
 }
 
 func fnv1a64(sum uint64, value uint64) uint64 {

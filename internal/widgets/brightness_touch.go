@@ -172,6 +172,20 @@ func (s *brightnessTouchSource) FrameAt(ctx context.Context, _ time.Duration) (i
 	return img, nil
 }
 
+func (s *brightnessTouchSource) StateSignature(ctx context.Context, _ time.Duration) (uint64, error) {
+	state, err := s.brightness.State(ctx)
+	if err != nil {
+		sum := newStateHash()
+		sum = addStateHashString(sum, defaultBrightnessNoControl)
+		return sum, nil
+	}
+
+	sum := newStateHash()
+	sum = addStateHashString(sum, state.Display)
+	sum = addStateHashInt(sum, clampBrightnessPercent(state.Brightness))
+	return sum, nil
+}
+
 func (s *brightnessTouchSource) Duration() time.Duration {
 	return 0
 }

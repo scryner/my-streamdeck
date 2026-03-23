@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"log"
 	"os"
 	"sync"
@@ -17,6 +18,7 @@ func RunMenuBar() error {
 	manager := &runtimeManager{}
 	var stopWakeObserver sync.Once
 	var stopWake func()
+	var stopPprof func(context.Context) error
 
 	systray.Run(func() {
 		icon := menuBarIcon()
@@ -24,17 +26,24 @@ func RunMenuBar() error {
 		systray.SetTitle("")
 		systray.SetTooltip("my-streamdeck")
 
+		pprofStop, err := startPprofServerFromEnv()
+		if err != nil {
+			log.Printf("start pprof server: %v", err)
+		} else {
+			stopPprof = pprofStop
+		}
+
 		if err := manager.start(); err != nil {
 			log.Printf("start runtime: %v", err)
 		}
 
-		stop, err := startWakeObserver(func() {
+		wakeStop, err := startWakeObserver(func() {
 			if err := manager.restart(); err != nil {
 				log.Printf("restart runtime after wake: %v", err)
 			}
 		})
 		if err == nil {
-			stopWake = stop
+			stopWake = wakeStop
 		}
 
 		quitItem := systray.AddMenuItem("Quit", "Quit my-streamdeck")
@@ -45,6 +54,11 @@ func RunMenuBar() error {
 					stopWake()
 				}
 			})
+			if stopPprof != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				_ = stopPprof(ctx)
+				cancel()
+			}
 			manager.close()
 			systray.Quit()
 		}()
@@ -54,6 +68,11 @@ func RunMenuBar() error {
 				stopWake()
 			}
 		})
+		if stopPprof != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = stopPprof(ctx)
+			cancel()
+		}
 		exitProcess(0)
 	})
 

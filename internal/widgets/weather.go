@@ -255,6 +255,37 @@ func (s *weatherViewSource) FrameAt(ctx context.Context, _ time.Duration) (image
 	return img, nil
 }
 
+func (s *weatherViewSource) StateSignature(ctx context.Context, _ time.Duration) (uint64, error) {
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	default:
+	}
+
+	sum := newStateHash()
+	sum = addStateHashInt(sum, int(s.view))
+
+	snapshot, ok := s.widget.currentSnapshot()
+	if !ok {
+		sum = addStateHashBool(sum, false)
+		return sum, nil
+	}
+
+	sum = addStateHashBool(sum, true)
+	sum = addStateHashString(sum, snapshot.Current.TempC)
+	sum = addStateHashString(sum, snapshot.Current.Condition)
+	sum = addStateHashString(sum, snapshot.Current.UVIndex)
+	for i := 0; i < len(snapshot.Days) && i < 3; i++ {
+		day := snapshot.Days[i]
+		sum = addStateHashInt64(sum, day.Date.Unix())
+		sum = addStateHashString(sum, day.MinTempC)
+		sum = addStateHashString(sum, day.MaxTempC)
+		sum = addStateHashString(sum, day.Condition)
+		sum = addStateHashString(sum, day.IconURL)
+	}
+	return sum, nil
+}
+
 func (s *weatherViewSource) Duration() time.Duration {
 	return 0
 }

@@ -73,9 +73,8 @@ func NewMicrophoneTouchWidget(options MicrophoneTouchWidgetOptions) (*Microphone
 	}
 
 	touch.Animation = &decktouch.Animation{
-		Source:         source,
-		UpdateInterval: volumeTouchUpdateInterval,
-		Loop:           true,
+		Source: source,
+		Loop:   true,
 	}
 
 	widget := &MicrophoneTouchWidget{
@@ -151,6 +150,19 @@ func (s *microphoneTouchSource) FrameAt(ctx context.Context, _ time.Duration) (i
 	img := image.NewRGBA(image.Rect(0, 0, s.size.X, s.size.Y))
 	s.render(img, state)
 	return img, nil
+}
+
+func (s *microphoneTouchSource) StateSignature(ctx context.Context, _ time.Duration) (uint64, error) {
+	state, err := s.audio.State(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	sum := newStateHash()
+	sum = addStateHashString(sum, state.Source)
+	sum = addStateHashInt(sum, clampVolumePercent(state.Volume))
+	sum = addStateHashBool(sum, state.Muted)
+	return sum, nil
 }
 
 func (s *microphoneTouchSource) Duration() time.Duration {

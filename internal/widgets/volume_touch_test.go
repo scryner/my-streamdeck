@@ -61,8 +61,8 @@ func TestVolumeTouchWidgetTouchMetadata(t *testing.T) {
 	if touch.Animation == nil {
 		t.Fatal("expected animation to be configured")
 	}
-	if touch.Animation.UpdateInterval != volumeTouchUpdateInterval {
-		t.Fatalf("unexpected update interval: got %s want %s", touch.Animation.UpdateInterval, volumeTouchUpdateInterval)
+	if touch.Animation.UpdateInterval != 0 {
+		t.Fatalf("expected event-driven touch widget without polling interval, got %s", touch.Animation.UpdateInterval)
 	}
 }
 

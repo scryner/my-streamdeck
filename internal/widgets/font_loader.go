@@ -2,8 +2,12 @@ package widgets
 
 import (
 	"os"
+	"sync"
 
 	"golang.org/x/image/font"
+	"golang.org/x/image/font/gofont/gobold"
+	"golang.org/x/image/font/gofont/gomono"
+	"golang.org/x/image/font/opentype"
 )
 
 var hangulFontCandidates = []string{
@@ -13,12 +17,99 @@ var hangulFontCandidates = []string{
 	"/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
 }
 
+const (
+	fontCacheKeyGoBold = "embedded:gobold"
+	fontCacheKeyGoMono = "embedded:gomono"
+)
+
+var (
+	fontCacheMu     sync.RWMutex
+	parsedFontCache = map[string]*opentype.Font{}
+)
+
 func newFaceFromFile(path string, size float64) (font.Face, error) {
-	data, err := os.ReadFile(path)
+	parsed, err := cachedParsedFont("file:"+path, func() ([]byte, error) {
+		return os.ReadFile(path)
+	})
 	if err != nil {
 		return nil, err
 	}
-	return newFace(data, size)
+	return newFaceFromParsedFont(parsed, size)
+}
+
+func newFace(ttf []byte, size float64) (font.Face, error) {
+	if cacheKey, ok := embeddedFontCacheKey(ttf); ok {
+		parsed, err := cachedParsedFont(cacheKey, func() ([]byte, error) {
+			return ttf, nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		return newFaceFromParsedFont(parsed, size)
+	}
+
+	parsed, err := opentype.Parse(ttf)
+	if err != nil {
+		return nil, err
+	}
+	return newFaceFromParsedFont(parsed, size)
+}
+
+func newFaceFromParsedFont(parsed *opentype.Font, size float64) (font.Face, error) {
+	return opentype.NewFace(parsed, &opentype.FaceOptions{
+		Size:    size,
+		DPI:     72,
+		Hinting: font.HintingFull,
+	})
+}
+
+func cachedParsedFont(cacheKey string, load func() ([]byte, error)) (*opentype.Font, error) {
+	fontCacheMu.RLock()
+	parsed := parsedFontCache[cacheKey]
+	fontCacheMu.RUnlock()
+	if parsed != nil {
+		return parsed, nil
+	}
+
+	data, err := load()
+	if err != nil {
+		return nil, err
+	}
+
+	parsed, err = opentype.Parse(data)
+	if err != nil {
+		return nil, err
+	}
+
+	fontCacheMu.Lock()
+	if cached := parsedFontCache[cacheKey]; cached != nil {
+		fontCacheMu.Unlock()
+		return cached, nil
+	}
+	parsedFontCache[cacheKey] = parsed
+	fontCacheMu.Unlock()
+	return parsed, nil
+}
+
+func embeddedFontCacheKey(ttf []byte) (string, bool) {
+	switch {
+	case sameFontData(ttf, gobold.TTF):
+		return fontCacheKeyGoBold, true
+	case sameFontData(ttf, gomono.TTF):
+		return fontCacheKeyGoMono, true
+	default:
+		return "", false
+	}
+}
+
+func sameFontData(a []byte, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	if len(a) == 0 {
+		return true
+	}
+	return &a[0] == &b[0]
 }
 
 func newHangulCapableFace(size float64) (font.Face, error) {

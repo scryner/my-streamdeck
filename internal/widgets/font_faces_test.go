@@ -1,10 +1,12 @@
 package widgets
 
 import (
+	"os"
 	"reflect"
 	"testing"
 
 	"golang.org/x/image/font"
+	"golang.org/x/image/font/gofont/gobold"
 )
 
 func TestLoadFacesReturnDistinctInstances(t *testing.T) {
@@ -68,6 +70,37 @@ func TestLoadFacesReturnDistinctInstances(t *testing.T) {
 	}
 	if sameFace(caffeinateA.status, caffeinateB.status) {
 		t.Fatal("expected caffeinate faces to be unique per load")
+	}
+}
+
+func TestNewFaceFromFileCachesParsedFont(t *testing.T) {
+	path := t.TempDir() + "/cached-font.ttf"
+	if err := os.WriteFile(path, gobold.TTF, 0o600); err != nil {
+		t.Fatalf("write temp font: %v", err)
+	}
+
+	first, err := newFaceFromFile(path, 16)
+	if err != nil {
+		t.Fatalf("first load: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = first.Close()
+	})
+
+	if err := os.Remove(path); err != nil {
+		t.Fatalf("remove temp font: %v", err)
+	}
+
+	second, err := newFaceFromFile(path, 16)
+	if err != nil {
+		t.Fatalf("second load from cache: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = second.Close()
+	})
+
+	if sameFace(first, second) {
+		t.Fatal("expected cached font loads to return distinct face instances")
 	}
 }
 

@@ -14,7 +14,6 @@ import (
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/gofont/gobold"
 	"golang.org/x/image/font/gofont/gomono"
-	"golang.org/x/image/font/opentype"
 	"golang.org/x/image/math/fixed"
 	"rafaelmartins.com/p/streamdeck"
 )
@@ -226,19 +225,6 @@ func loadClockFaces(size int) (clockFaces, error) {
 		small: small,
 		tiny:  tiny,
 	}, nil
-}
-
-func newFace(ttf []byte, size float64) (font.Face, error) {
-	parsed, err := opentype.Parse(ttf)
-	if err != nil {
-		return nil, err
-	}
-
-	return opentype.NewFace(parsed, &opentype.FaceOptions{
-		Size:    size,
-		DPI:     72,
-		Hinting: font.HintingFull,
-	})
 }
 
 func closeFaces(faces ...font.Face) error {

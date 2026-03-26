@@ -2,8 +2,10 @@ package app
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
+	"runtime"
 	"sync"
 	"time"
 
@@ -12,9 +14,16 @@ import (
 
 var exitProcess = os.Exit
 
-const runtimeRestartAttempts = 20
+const (
+	runtimeRestartAttempts   = 20
+	runtimeRestartRetryDelay = 500 * time.Millisecond
+)
 
-func RunMenuBar() error {
+var startRuntime = StartRuntime
+
+func RunMenuBar(opts RunOptions) error {
+	SetVerboseLogging(opts.Verbose)
+
 	manager := &runtimeManager{}
 	var stopWakeObserver sync.Once
 	var stopWake func()
@@ -26,7 +35,7 @@ func RunMenuBar() error {
 		systray.SetTitle("")
 		systray.SetTooltip("my-streamdeck")
 
-		pprofStop, err := startPprofServerFromEnv()
+		pprofStop, err := startPprofServer(opts.EnablePprof)
 		if err != nil {
 			log.Printf("start pprof server: %v", err)
 		} else {
@@ -38,6 +47,7 @@ func RunMenuBar() error {
 		}
 
 		wakeStop, err := startWakeObserver(func() {
+			debugf("wake observer: notification received goroutines=%d", runtime.NumGoroutine())
 			if err := manager.restart(); err != nil {
 				log.Printf("restart runtime after wake: %v", err)
 			}
@@ -91,21 +101,28 @@ func (m *runtimeManager) start() error {
 	defer m.opMu.Unlock()
 
 	if m.isClosed() {
+		debugf("runtime manager: start skipped because manager is closed")
 		return nil
 	}
 
-	rt, err := StartRuntime()
+	debugf("runtime manager: start begin goroutines=%d", runtime.NumGoroutine())
+	rt, err := startRuntime()
 	if err != nil {
+		log.Printf("runtime manager: start failed: %v", err)
 		return err
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
-		rt.Close()
+		debugf("runtime manager: start produced runtime[%d] but manager is closed; closing runtime", rt.id)
+		if closeErr := rt.Close(); closeErr != nil {
+			log.Printf("runtime manager: close runtime[%d] after start race: %v", rt.id, closeErr)
+		}
 		return nil
 	}
 	m.runtime = rt
+	debugf("runtime manager: start attached runtime[%d]", rt.id)
 	m.watch(rt)
 	return nil
 }
@@ -115,6 +132,7 @@ func (m *runtimeManager) restart() error {
 	defer m.opMu.Unlock()
 
 	if m.isClosed() {
+		debugf("runtime manager: restart skipped because manager is closed")
 		return nil
 	}
 
@@ -123,35 +141,59 @@ func (m *runtimeManager) restart() error {
 	previous = m.runtime
 	m.runtime = nil
 	m.mu.Unlock()
+	if previous != nil {
+		debugf("runtime manager: restart begin previous=runtime[%d] goroutines=%d", previous.id, runtime.NumGoroutine())
+	} else {
+		debugf("runtime manager: restart begin with no active runtime goroutines=%d", runtime.NumGoroutine())
+	}
 
 	if previous != nil {
-		previous.Close()
+		if closeErr := previous.Close(); closeErr != nil {
+			if errors.Is(closeErr, ErrRuntimeCloseTimedOut) {
+				m.mu.Lock()
+				if !m.closed && m.runtime == nil {
+					m.runtime = previous
+				}
+				m.mu.Unlock()
+				log.Printf("runtime manager: restart aborted runtime[%d] did not stop: %v", previous.id, closeErr)
+				return closeErr
+			}
+			log.Printf("runtime manager: runtime[%d] close warning during restart: %v", previous.id, closeErr)
+		}
 	}
 
 	var lastErr error
 	for attempt := 0; attempt < runtimeRestartAttempts; attempt++ {
 		if m.isClosed() {
+			debugf("runtime manager: restart aborted because manager closed during attempt %d", attempt+1)
 			return nil
 		}
 
-		rt, err := StartRuntime()
+		debugf("runtime manager: restart attempt=%d goroutines=%d", attempt+1, runtime.NumGoroutine())
+		rt, err := startRuntime()
 		if err == nil {
 			m.mu.Lock()
 			if m.closed {
 				m.mu.Unlock()
-				rt.Close()
+				debugf("runtime manager: restart created runtime[%d] but manager closed; closing runtime", rt.id)
+				if closeErr := rt.Close(); closeErr != nil {
+					log.Printf("runtime manager: close runtime[%d] after restart race: %v", rt.id, closeErr)
+				}
 				return nil
 			}
 			m.runtime = rt
 			m.mu.Unlock()
+			debugf("runtime manager: restart attached runtime[%d] after attempt=%d", rt.id, attempt+1)
 			m.watch(rt)
 			return nil
 		}
 
 		lastErr = err
-		time.Sleep(500 * time.Millisecond)
+		log.Printf("runtime manager: restart attempt=%d failed: %v", attempt+1, err)
+		time.Sleep(runtimeRestartRetryDelay)
 	}
 
+	log.Printf("runtime manager: restart exhausted attempts lastErr=%v", lastErr)
 	return lastErr
 }
 
@@ -166,7 +208,10 @@ func (m *runtimeManager) close() {
 	m.mu.Unlock()
 
 	if rt != nil {
-		rt.Close()
+		debugf("runtime manager: close runtime[%d]", rt.id)
+		if err := rt.Close(); err != nil {
+			log.Printf("runtime manager: close runtime[%d] failed: %v", rt.id, err)
+		}
 	}
 }
 
@@ -178,8 +223,10 @@ func (m *runtimeManager) isClosed() bool {
 
 func (m *runtimeManager) watch(rt *Runtime) {
 	go func() {
+		debugf("runtime manager: watch begin runtime[%d]", rt.id)
 		err, ok := <-rt.UnexpectedStop()
 		if !ok || err == nil {
+			debugf("runtime manager: watch end runtime[%d] ok=%t err=%v", rt.id, ok, err)
 			return
 		}
 
@@ -188,10 +235,21 @@ func (m *runtimeManager) watch(rt *Runtime) {
 		closed := m.closed
 		m.mu.Unlock()
 		if closed || current != rt {
+			currentID := uint64(0)
+			if current != nil {
+				currentID = current.id
+			}
+			debugf(
+				"runtime manager: watch ignore runtime[%d] current=runtime[%d] closed=%t err=%v",
+				rt.id,
+				currentID,
+				closed,
+				err,
+			)
 			return
 		}
 
-		log.Printf("runtime stopped unexpectedly, attempting restart: %v", err)
+		log.Printf("runtime manager: watch runtime[%d] unexpected stop, restarting: %v", rt.id, err)
 		if restartErr := m.restart(); restartErr != nil {
 			log.Printf("restart runtime after unexpected stop: %v", restartErr)
 		}

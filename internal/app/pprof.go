@@ -15,14 +15,13 @@ import (
 )
 
 const pprofAddrEnv = "MY_STREAMDECK_PPROF_ADDR"
+const defaultPprofAddr = "127.0.0.1:6060"
 
-func startPprofServerFromEnv() (func(context.Context) error, error) {
-	raw := strings.TrimSpace(os.Getenv(pprofAddrEnv))
-	if raw == "" {
+func startPprofServer(enabled bool) (func(context.Context) error, error) {
+	addr, err := resolvePprofAddr(strings.TrimSpace(os.Getenv(pprofAddrEnv)), enabled)
+	if addr == "" {
 		return nil, nil
 	}
-
-	addr, err := normalizePprofAddr(raw)
 	if err != nil {
 		return nil, err
 	}
@@ -41,13 +40,24 @@ func startPprofServerFromEnv() (func(context.Context) error, error) {
 	}
 
 	go func() {
-		log.Printf("pprof listening on http://%s/debug/pprof/", addr)
+		debugf("pprof listening on http://%s/debug/pprof/", addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("pprof server stopped: %v", err)
 		}
 	}()
 
 	return srv.Shutdown, nil
+}
+
+func resolvePprofAddr(raw string, enabled bool) (string, error) {
+	if raw == "" {
+		if !enabled {
+			return "", nil
+		}
+		raw = defaultPprofAddr
+	}
+
+	return normalizePprofAddr(raw)
 }
 
 func normalizePprofAddr(raw string) (string, error) {

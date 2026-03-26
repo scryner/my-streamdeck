@@ -2,6 +2,10 @@ module github.com/scryner/my-streamdeck
 
 go 1.24.3
 
+replace rafaelmartins.com/p/streamdeck => ./third_party/streamdeck
+
+replace rafaelmartins.com/p/usbhid => ./third_party/usbhid
+
 require (
 	github.com/kettek/apng v0.0.0-20191108220231-414630eed80f
 	github.com/shirou/gopsutil/v4 v4.26.2

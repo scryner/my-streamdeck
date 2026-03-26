@@ -1,13 +1,16 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
 	"log"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/scryner/my-streamdeck/internal/deckbutton"
@@ -17,13 +20,17 @@ import (
 )
 
 type Runtime struct {
+	id               uint64
 	device           *streamdeck.Device
 	controller       *deckbutton.Controller
 	touchController  *decktouch.Controller
 	stopCh           chan struct{}
 	doneCh           chan struct{}
 	unexpectedStopCh chan error
+	startedAt        time.Time
 	closeOnce        sync.Once
+	closeErrMu       sync.Mutex
+	closeErr         error
 }
 
 const (
@@ -33,7 +40,16 @@ const (
 	runtimeBrightnessPercent       = 100
 )
 
+var (
+	ErrRuntimeCloseTimedOut = errors.New("runtime close timed out")
+	runtimeCloseTimeout     = 5 * time.Second
+	runtimeIDSeq            atomic.Uint64
+)
+
 func StartRuntime() (*Runtime, error) {
+	id := runtimeIDSeq.Add(1)
+	debugf("runtime[%d] start: begin goroutines=%d", id, runtime.NumGoroutine())
+
 	cfg, exists, err := LoadConfig()
 	if err != nil {
 		log.Printf("config load failed, falling back to defaults: %v", err)
@@ -43,11 +59,13 @@ func StartRuntime() (*Runtime, error) {
 
 	device, err := openFreshDevice()
 	if err != nil {
+		log.Printf("runtime[%d] start: open device failed: %v", id, err)
 		return nil, err
 	}
 	settings := cfg.SettingsMap()
 	if err := device.SetBrightness(resolveBrightness(settings)); err != nil {
 		_ = device.Close()
+		log.Printf("runtime[%d] start: set brightness failed: %v", id, err)
 		return nil, fmt.Errorf("set stream deck brightness: %w", err)
 	}
 	time.Sleep(runtimeDisplayWakeDelay)
@@ -55,6 +73,7 @@ func StartRuntime() (*Runtime, error) {
 	buttonWidgets, usedKeys, err := buildButtonWidgets(cfg, exists, int(device.GetKeyCount()))
 	if err != nil {
 		_ = device.Close()
+		log.Printf("runtime[%d] start: build button widgets failed: %v", id, err)
 		return nil, err
 	}
 	buttons := make([]deckbutton.Button, 0, len(buttonWidgets))
@@ -64,6 +83,7 @@ func StartRuntime() (*Runtime, error) {
 
 	if err := clearUnusedKeys(device, usedKeys); err != nil {
 		_ = device.Close()
+		log.Printf("runtime[%d] start: clear unused keys failed: %v", id, err)
 		return nil, err
 	}
 
@@ -71,6 +91,7 @@ func StartRuntime() (*Runtime, error) {
 	if err := controller.RegisterButtons(buttons...); err != nil {
 		controller.Close()
 		_ = device.Close()
+		log.Printf("runtime[%d] start: register buttons failed: %v", id, err)
 		return nil, err
 	}
 
@@ -78,6 +99,7 @@ func StartRuntime() (*Runtime, error) {
 	if err != nil {
 		controller.Close()
 		_ = device.Close()
+		log.Printf("runtime[%d] start: build touch widgets failed: %v", id, err)
 		return nil, err
 	}
 
@@ -87,6 +109,7 @@ func StartRuntime() (*Runtime, error) {
 		if err != nil {
 			controller.Close()
 			_ = device.Close()
+			log.Printf("runtime[%d] start: new touch controller failed: %v", id, err)
 			return nil, err
 		}
 
@@ -98,18 +121,29 @@ func StartRuntime() (*Runtime, error) {
 			touchController.Close()
 			controller.Close()
 			_ = device.Close()
+			log.Printf("runtime[%d] start: register touch widgets failed: %v", id, err)
 			return nil, err
 		}
 	}
 
 	rt := &Runtime{
+		id:               id,
 		device:           device,
 		controller:       controller,
 		touchController:  touchController,
 		stopCh:           make(chan struct{}),
 		doneCh:           make(chan struct{}),
 		unexpectedStopCh: make(chan error, 1),
+		startedAt:        time.Now(),
 	}
+	debugf(
+		"runtime[%d] start: ready device=%p buttons=%d touchWidgets=%d goroutines=%d",
+		rt.id,
+		rt.device,
+		len(buttons),
+		len(touchWidgets),
+		runtime.NumGoroutine(),
+	)
 	go rt.listen()
 	return rt, nil
 }
@@ -154,7 +188,22 @@ func resolveBrightness(settings map[string]string) byte {
 func (r *Runtime) listen() {
 	defer close(r.doneCh)
 	defer close(r.unexpectedStopCh)
+	debugf("runtime[%d] listen: begin device=%p goroutines=%d", r.id, r.device, runtime.NumGoroutine())
 	if err := r.device.Listen(nil); err != nil {
+		stopping := false
+		select {
+		case <-r.stopCh:
+			stopping = true
+		default:
+		}
+		debugf(
+			"runtime[%d] listen: exit err=%v stopping=%t uptime=%s goroutines=%d",
+			r.id,
+			err,
+			stopping,
+			time.Since(r.startedAt).Round(time.Millisecond),
+			runtime.NumGoroutine(),
+		)
 		select {
 		case <-r.stopCh:
 			return
@@ -165,11 +214,34 @@ func (r *Runtime) listen() {
 			}
 			log.Printf("stream deck listener stopped: %v", err)
 		}
+		return
 	}
+	debugf(
+		"runtime[%d] listen: exit clean uptime=%s goroutines=%d",
+		r.id,
+		time.Since(r.startedAt).Round(time.Millisecond),
+		runtime.NumGoroutine(),
+	)
 }
 
-func (r *Runtime) Close() {
+func (r *Runtime) appendCloseErr(err error) {
+	if err == nil {
+		return
+	}
+	r.closeErrMu.Lock()
+	defer r.closeErrMu.Unlock()
+	r.closeErr = errors.Join(r.closeErr, err)
+}
+
+func (r *Runtime) currentCloseErr() error {
+	r.closeErrMu.Lock()
+	defer r.closeErrMu.Unlock()
+	return r.closeErr
+}
+
+func (r *Runtime) Close() error {
 	r.closeOnce.Do(func() {
+		debugf("runtime[%d] close: begin device=%p goroutines=%d", r.id, r.device, runtime.NumGoroutine())
 		close(r.stopCh)
 		if r.touchController != nil {
 			r.touchController.Close()
@@ -180,14 +252,38 @@ func (r *Runtime) Close() {
 		if r.device != nil && r.device.IsOpen() {
 			if err := clearDisplays(r.device); err != nil {
 				log.Printf("clear stream deck displays: %v", err)
+				r.appendCloseErr(fmt.Errorf("clear stream deck displays: %w", err))
 			}
-			_ = r.device.Close()
-		}
-		select {
-		case <-r.doneCh:
-		case <-time.After(200 * time.Millisecond):
+			if err := r.device.Close(); err != nil {
+				log.Printf("close stream deck device: %v", err)
+				r.appendCloseErr(fmt.Errorf("close stream deck device: %w", err))
+			}
 		}
 	})
+
+	waitedForDone := true
+	timer := time.NewTimer(runtimeCloseTimeout)
+	defer timer.Stop()
+	select {
+	case <-r.doneCh:
+	case <-timer.C:
+		waitedForDone = false
+	}
+
+	closeErr := r.currentCloseErr()
+	if !waitedForDone {
+		closeErr = errors.Join(closeErr, ErrRuntimeCloseTimedOut)
+	}
+
+	debugf(
+		"runtime[%d] close: end waitedForDone=%t err=%v uptime=%s goroutines=%d",
+		r.id,
+		waitedForDone,
+		closeErr,
+		time.Since(r.startedAt).Round(time.Millisecond),
+		runtime.NumGoroutine(),
+	)
+	return closeErr
 }
 
 func (r *Runtime) UnexpectedStop() <-chan error {

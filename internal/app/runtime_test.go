@@ -1,6 +1,10 @@
 package app
 
-import "testing"
+import (
+	"errors"
+	"testing"
+	"time"
+)
 
 func TestResolveBrightness(t *testing.T) {
 	t.Parallel()
@@ -45,5 +49,32 @@ func TestResolveBrightness(t *testing.T) {
 				t.Fatalf("resolveBrightness() = %d, want %d", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestRuntimeCloseWaitsForDoneAcrossCalls(t *testing.T) {
+	oldTimeout := runtimeCloseTimeout
+	runtimeCloseTimeout = 10 * time.Millisecond
+	t.Cleanup(func() {
+		runtimeCloseTimeout = oldTimeout
+	})
+
+	rt := &Runtime{
+		id:               1,
+		stopCh:           make(chan struct{}),
+		doneCh:           make(chan struct{}),
+		unexpectedStopCh: make(chan error),
+		startedAt:        time.Now(),
+	}
+
+	err := rt.Close()
+	if !errors.Is(err, ErrRuntimeCloseTimedOut) {
+		t.Fatalf("Close() timeout error = %v, want %v", err, ErrRuntimeCloseTimedOut)
+	}
+
+	close(rt.doneCh)
+
+	if err := rt.Close(); err != nil {
+		t.Fatalf("Close() after done = %v, want nil", err)
 	}
 }

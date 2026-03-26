@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/getlantern/systray"
+	"github.com/scryner/my-streamdeck/internal/widgets"
 )
 
 var exitProcess = os.Exit
@@ -23,6 +24,7 @@ var startRuntime = StartRuntime
 
 func RunMenuBar(opts RunOptions) error {
 	SetVerboseLogging(opts.Verbose)
+	widgets.SetVerboseLogging(opts.Verbose)
 
 	manager := &runtimeManager{}
 	var stopWakeObserver sync.Once

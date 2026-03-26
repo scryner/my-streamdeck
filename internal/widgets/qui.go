@@ -167,11 +167,22 @@ func (s *quiSource) FrameAt(ctx context.Context, _ time.Duration) (image.Image, 
 
 	snapshot := s.cachedSnapshot()
 	if s.shouldRefresh() {
+		wasSignalLost := s.isSignalLost()
 		fresh, err := s.fetch(ctx, s.baseURL, s.apiKey)
 		if err == nil {
 			s.storeSnapshot(fresh)
+			if wasSignalLost {
+				debugf(
+					"qui widget: signal restored baseURL=%s downloading=%d completed=%d seeding=%d",
+					s.baseURL,
+					fresh.Downloading,
+					fresh.Completed,
+					fresh.Seeding,
+				)
+			}
 			snapshot = fresh
 		} else {
+			debugf("qui widget: fetch failed baseURL=%s err=%v", s.baseURL, err)
 			s.markSignalLost()
 		}
 	}
@@ -221,7 +232,7 @@ func (s *quiSource) Close() error {
 func (s *quiSource) shouldRefresh() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return !s.hasData || time.Since(s.lastFetch) >= quiWidgetUpdateInterval
+	return s.lastFetch.IsZero() || time.Since(s.lastFetch) >= quiWidgetUpdateInterval
 }
 
 func (s *quiSource) cachedSnapshot() quiSnapshot {

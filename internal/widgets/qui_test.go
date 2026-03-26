@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"rafaelmartins.com/p/streamdeck"
 )
@@ -168,5 +169,67 @@ func TestQuiWidgetShowsNoSignalOnFetchFailure(t *testing.T) {
 	}
 	if visiblePixels == 0 {
 		t.Fatal("expected no signal message to render near center")
+	}
+}
+
+func TestQuiWidgetRetriesAfterInitialFailure(t *testing.T) {
+	t.Parallel()
+
+	fetchCalls := 0
+	widget, err := NewQuiWidget(QuiWidgetOptions{
+		Key:     streamdeck.KEY_8,
+		Size:    DefaultClockWidgetSize,
+		BaseURL: "https://example.test",
+		APIKey:  "test-key",
+		Fetch: func(context.Context, string, string) (quiSnapshot, error) {
+			fetchCalls++
+			if fetchCalls == 1 {
+				return quiSnapshot{}, fmt.Errorf("dial error")
+			}
+			return quiSnapshot{
+				Downloading: 2,
+				Completed:   3,
+				Seeding:     5,
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewQuiWidget: %v", err)
+	}
+
+	source := widget.source
+
+	if _, err := source.FrameAt(context.Background(), 0); err != nil {
+		t.Fatalf("initial FrameAt: %v", err)
+	}
+	if fetchCalls != 1 {
+		t.Fatalf("expected 1 fetch after initial frame, got %d", fetchCalls)
+	}
+	if !source.isSignalLost() {
+		t.Fatal("expected signalLost after initial fetch failure")
+	}
+	if source.shouldRefresh() {
+		t.Fatal("expected failed fetch to wait until retry interval before refreshing again")
+	}
+
+	source.mu.Lock()
+	source.lastFetch = time.Now().Add(-quiWidgetUpdateInterval - time.Second)
+	source.mu.Unlock()
+
+	if !source.shouldRefresh() {
+		t.Fatal("expected refresh after retry interval elapsed")
+	}
+	if _, err := source.FrameAt(context.Background(), 0); err != nil {
+		t.Fatalf("retry FrameAt: %v", err)
+	}
+	if fetchCalls != 2 {
+		t.Fatalf("expected retry fetch after interval, got %d calls", fetchCalls)
+	}
+	if source.isSignalLost() {
+		t.Fatal("expected signalLost cleared after successful retry")
+	}
+	snapshot := source.cachedSnapshot()
+	if snapshot.Downloading != 2 || snapshot.Completed != 3 || snapshot.Seeding != 5 {
+		t.Fatalf("unexpected snapshot after retry: %+v", snapshot)
 	}
 }

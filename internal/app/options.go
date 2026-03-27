@@ -1,6 +1,7 @@
 package app
 
 type RunOptions struct {
-	EnablePprof bool
-	Verbose     bool
+	EnablePprof  bool
+	Verbose      bool
+	ReexecOnWake bool
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/getlantern/systray"
@@ -21,6 +22,7 @@ const (
 )
 
 var startRuntime = StartRuntime
+var reexecProcess = reexecCurrentProcess
 
 func RunMenuBar(opts RunOptions) error {
 	SetVerboseLogging(opts.Verbose)
@@ -30,6 +32,24 @@ func RunMenuBar(opts RunOptions) error {
 	var stopWakeObserver sync.Once
 	var stopWake func()
 	var stopPprof func(context.Context) error
+	var reexecRequested atomic.Bool
+	var shutdownOnce sync.Once
+
+	shutdown := func() {
+		shutdownOnce.Do(func() {
+			stopWakeObserver.Do(func() {
+				if stopWake != nil {
+					stopWake()
+				}
+			})
+			if stopPprof != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				_ = stopPprof(ctx)
+				cancel()
+			}
+			manager.close()
+		})
+	}
 
 	systray.Run(func() {
 		icon := menuBarIcon()
@@ -50,6 +70,23 @@ func RunMenuBar(opts RunOptions) error {
 
 		wakeStop, err := startWakeObserver(func() {
 			debugf("wake observer: notification received goroutines=%d", runtime.NumGoroutine())
+			if opts.ReexecOnWake {
+				if err := validateReexecTarget(); err != nil {
+					log.Printf("wake observer: reexec skipped: %v", err)
+					if err := manager.restart(); err != nil {
+						log.Printf("restart runtime after wake: %v", err)
+					}
+					return
+				}
+				if !reexecRequested.CompareAndSwap(false, true) {
+					debugf("wake observer: wake recovery already in progress")
+					return
+				}
+				debugf("wake observer: reexec requested, shutting down current runtime")
+				shutdown()
+				systray.Quit()
+				return
+			}
 			if err := manager.restart(); err != nil {
 				log.Printf("restart runtime after wake: %v", err)
 			}
@@ -61,29 +98,15 @@ func RunMenuBar(opts RunOptions) error {
 		quitItem := systray.AddMenuItem("Quit", "Quit my-streamdeck")
 		go func() {
 			<-quitItem.ClickedCh
-			stopWakeObserver.Do(func() {
-				if stopWake != nil {
-					stopWake()
-				}
-			})
-			if stopPprof != nil {
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				_ = stopPprof(ctx)
-				cancel()
-			}
-			manager.close()
+			shutdown()
 			systray.Quit()
 		}()
 	}, func() {
-		stopWakeObserver.Do(func() {
-			if stopWake != nil {
-				stopWake()
+		shutdown()
+		if reexecRequested.Load() {
+			if err := reexecProcess(); err != nil {
+				log.Printf("reexec runtime after wake: %v", err)
 			}
-		})
-		if stopPprof != nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			_ = stopPprof(ctx)
-			cancel()
 		}
 		exitProcess(0)
 	})

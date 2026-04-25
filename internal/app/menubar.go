@@ -34,6 +34,11 @@ func RunMenuBar(opts RunOptions) error {
 			supervisor.close()
 		})
 	}
+	restartChild := func(reason string) {
+		if err := supervisor.restart(); err != nil {
+			log.Printf("child supervisor: restart after %s failed: %v", reason, err)
+		}
+	}
 
 	systray.Run(func() {
 		icon := menuBarIcon()
@@ -47,15 +52,21 @@ func RunMenuBar(opts RunOptions) error {
 
 		wakeStop, err := startWakeObserver(func() {
 			debugf("wake observer: notification received goroutines=%d", runtime.NumGoroutine())
-			if err := supervisor.restart(); err != nil {
-				log.Printf("child supervisor: restart after wake failed: %v", err)
-			}
+			restartChild("wake")
 		})
 		if err == nil {
 			stopWake = wakeStop
 		}
 
+		restartItem := systray.AddMenuItem("Restart", "Restart child process")
 		quitItem := systray.AddMenuItem("Quit", "Quit my-streamdeck")
+		go func() {
+			for range restartItem.ClickedCh {
+				debugf("menu bar: restart requested goroutines=%d", runtime.NumGoroutine())
+				restartChild("menu request")
+			}
+		}()
+
 		go func() {
 			<-quitItem.ClickedCh
 			shutdown()

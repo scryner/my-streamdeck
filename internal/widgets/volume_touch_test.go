@@ -2,6 +2,7 @@ package widgets
 
 import (
 	"context"
+	"errors"
 	"image"
 	"image/color"
 	"testing"
@@ -13,11 +14,15 @@ import (
 
 type fakeVolumeBackend struct {
 	state       VolumeState
+	err         error
 	setCalls    []int
 	toggleCalls int
 }
 
 func (f *fakeVolumeBackend) State(context.Context) (VolumeState, error) {
+	if f.err != nil {
+		return VolumeState{}, f.err
+	}
 	return f.state, nil
 }
 
@@ -178,6 +183,137 @@ func TestVolumeTouchWidgetRenderProducesVisibleContent(t *testing.T) {
 	}
 	if visiblePixels == 0 {
 		t.Fatal("expected volume touch widget to render visible content")
+	}
+}
+
+func TestVolumeTouchWidgetRenderNoControlOnBackendError(t *testing.T) {
+	t.Parallel()
+
+	backend := &fakeVolumeBackend{err: errors.New("unsupported output volume")}
+	widget, err := NewVolumeTouchWidget(VolumeTouchWidgetOptions{
+		ID:    decktouch.WIDGET_1,
+		Audio: backend,
+	})
+	if err != nil {
+		t.Fatalf("NewVolumeTouchWidget: %v", err)
+	}
+
+	frame, err := widget.Touch().Animation.Source.FrameAt(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("FrameAt: %v", err)
+	}
+
+	visiblePixels := 0
+	for y := 0; y < frame.Bounds().Dy(); y++ {
+		for x := 0; x < frame.Bounds().Dx(); x++ {
+			r, g, b, _ := frame.At(x, y).RGBA()
+			if maxUint32(r, g, b) > 0x7000 {
+				visiblePixels++
+			}
+		}
+	}
+	if visiblePixels == 0 {
+		t.Fatal("expected placeholder content to render when volume control is unavailable")
+	}
+}
+
+func TestVolumeTouchWidgetStateSignatureNoControlOnBackendError(t *testing.T) {
+	t.Parallel()
+
+	backend := &fakeVolumeBackend{err: errors.New("unsupported output volume")}
+	widget, err := NewVolumeTouchWidget(VolumeTouchWidgetOptions{
+		ID:    decktouch.WIDGET_1,
+		Audio: backend,
+	})
+	if err != nil {
+		t.Fatalf("NewVolumeTouchWidget: %v", err)
+	}
+
+	source, ok := widget.Touch().Animation.Source.(interface {
+		StateSignature(context.Context, time.Duration) (uint64, error)
+	})
+	if !ok {
+		t.Fatal("expected volume source to expose state signature")
+	}
+	if _, err := source.StateSignature(context.Background(), 0); err != nil {
+		t.Fatalf("StateSignature: %v", err)
+	}
+}
+
+func TestVolumeTouchWidgetRecoversAfterNoControl(t *testing.T) {
+	t.Parallel()
+
+	backend := &fakeVolumeBackend{err: errors.New("unsupported output volume")}
+	widget, err := NewVolumeTouchWidget(VolumeTouchWidgetOptions{
+		ID:    decktouch.WIDGET_1,
+		Audio: backend,
+	})
+	if err != nil {
+		t.Fatalf("NewVolumeTouchWidget: %v", err)
+	}
+
+	source, ok := widget.Touch().Animation.Source.(interface {
+		StateSignature(context.Context, time.Duration) (uint64, error)
+	})
+	if !ok {
+		t.Fatal("expected volume source to expose state signature")
+	}
+
+	noControlSig, err := source.StateSignature(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("StateSignature no control: %v", err)
+	}
+	if _, err := widget.Touch().Animation.Source.FrameAt(context.Background(), 0); err != nil {
+		t.Fatalf("FrameAt no control: %v", err)
+	}
+
+	backend.err = nil
+	backend.state = VolumeState{Source: "Mac Studio", Volume: 40}
+
+	normalSig, err := source.StateSignature(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("StateSignature recovered: %v", err)
+	}
+	if normalSig == noControlSig {
+		t.Fatal("expected recovered volume state to invalidate NO CONTROL signature")
+	}
+
+	touch := widget.Touch()
+	if err := touch.OnDialRotate(nil, &touch, nil, 2); err != nil {
+		t.Fatalf("OnDialRotate recovered: %v", err)
+	}
+	if backend.state.Volume != 48 {
+		t.Fatalf("expected recovered dial rotation to set volume 48, got %d", backend.state.Volume)
+	}
+	if len(backend.setCalls) != 1 || backend.setCalls[0] != 48 {
+		t.Fatalf("expected one recovered SetVolume call with 48, got %v", backend.setCalls)
+	}
+}
+
+func TestVolumeTouchWidgetNoControlKeepsEventDrivenCadence(t *testing.T) {
+	t.Parallel()
+
+	backend := &fakeVolumeBackend{err: errors.New("unsupported output volume")}
+	widget, err := NewVolumeTouchWidget(VolumeTouchWidgetOptions{
+		ID:    decktouch.WIDGET_1,
+		Audio: backend,
+	})
+	if err != nil {
+		t.Fatalf("NewVolumeTouchWidget: %v", err)
+	}
+
+	anim := widget.Touch().Animation
+	if anim.UpdateInterval != 0 {
+		t.Fatalf("expected no periodic polling interval in NO CONTROL path, got %s", anim.UpdateInterval)
+	}
+	if anim.FrameRate != 0 {
+		t.Fatalf("expected no frame-rate polling in NO CONTROL path, got %d", anim.FrameRate)
+	}
+	if _, ok := anim.Source.(interface{ NextFrameDelay() time.Duration }); ok {
+		t.Fatal("expected no dynamic polling delay in NO CONTROL path")
+	}
+	if _, ok := anim.Source.(interface{ Updates() <-chan struct{} }); !ok {
+		t.Fatal("expected volume source to remain event-driven")
 	}
 }
 

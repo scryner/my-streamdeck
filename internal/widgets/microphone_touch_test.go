@@ -2,6 +2,7 @@ package widgets
 
 import (
 	"context"
+	"errors"
 	"image"
 	"testing"
 
@@ -120,5 +121,36 @@ func TestMicrophoneTouchWidgetRenderProducesVisibleContent(t *testing.T) {
 	}
 	if !frame.Bounds().Eq(image.Rect(0, 0, defaultTouchWidgetWidth, defaultTouchWidgetHeight)) {
 		t.Fatalf("unexpected bounds: %v", frame.Bounds())
+	}
+}
+
+func TestMicrophoneTouchWidgetRenderNoControlOnBackendError(t *testing.T) {
+	t.Parallel()
+
+	backend := &fakeVolumeBackend{err: errors.New("unsupported input volume")}
+	widget, err := NewMicrophoneTouchWidget(MicrophoneTouchWidgetOptions{
+		ID:    decktouch.WIDGET_2,
+		Audio: backend,
+	})
+	if err != nil {
+		t.Fatalf("NewMicrophoneTouchWidget: %v", err)
+	}
+
+	frame, err := widget.Touch().Animation.Source.FrameAt(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("FrameAt: %v", err)
+	}
+
+	visiblePixels := 0
+	for y := 0; y < frame.Bounds().Dy(); y++ {
+		for x := 0; x < frame.Bounds().Dx(); x++ {
+			r, g, b, _ := frame.At(x, y).RGBA()
+			if maxUint32(r, g, b) > 0x7000 {
+				visiblePixels++
+			}
+		}
+	}
+	if visiblePixels == 0 {
+		t.Fatal("expected placeholder content to render when microphone control is unavailable")
 	}
 }

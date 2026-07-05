@@ -136,18 +136,20 @@ func (w *MicrophoneTouchWidget) toggleMute() error {
 
 func (s *microphoneTouchSource) Start(context.Context) error {
 	if backend, ok := s.audio.(volumeBackendWithChangeHandler); ok {
-		return backend.SetChangeHandler(s.notify)
+		_ = backend.SetChangeHandler(s.notify)
 	}
 	return nil
 }
 
 func (s *microphoneTouchSource) FrameAt(ctx context.Context, _ time.Duration) (image.Image, error) {
+	img := image.NewRGBA(image.Rect(0, 0, s.size.X, s.size.Y))
+
 	state, err := s.audio.State(ctx)
 	if err != nil {
-		return nil, err
+		s.renderUnavailable(img)
+		return img, nil
 	}
 
-	img := image.NewRGBA(image.Rect(0, 0, s.size.X, s.size.Y))
 	s.render(img, state)
 	return img, nil
 }
@@ -155,7 +157,9 @@ func (s *microphoneTouchSource) FrameAt(ctx context.Context, _ time.Duration) (i
 func (s *microphoneTouchSource) StateSignature(ctx context.Context, _ time.Duration) (uint64, error) {
 	state, err := s.audio.State(ctx)
 	if err != nil {
-		return 0, err
+		sum := newStateHash()
+		sum = addStateHashString(sum, defaultVolumeNoControl)
+		return sum, nil
 	}
 
 	sum := newStateHash()
@@ -204,6 +208,10 @@ func (s *microphoneTouchSource) render(dst *image.RGBA, state VolumeState) {
 	trackWidth := dst.Bounds().Dx() - trackX - 10
 	trackHeight := 12
 	drawVolumeSlider(dst, trackX, trackY, trackWidth, trackHeight, float64(clampVolumePercent(state.Volume))/100.0)
+}
+
+func (s *microphoneTouchSource) renderUnavailable(dst *image.RGBA) {
+	drawCenteredText(dst, s.faces.title, defaultVolumeNoControl, float64(dst.Bounds().Dx())/2, centeredTextBaselineY(s.faces.title, float64(dst.Bounds().Dy())/2), color.RGBA{R: 248, G: 248, B: 249, A: 255})
 }
 
 func newMicrophoneSystemBackend() *microphoneSystemBackend {

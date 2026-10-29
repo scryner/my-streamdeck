@@ -320,21 +320,15 @@ func TestVolumeTouchWidgetNoControlKeepsEventDrivenCadence(t *testing.T) {
 func TestVolumeSystemBackendNormalizesSourceName(t *testing.T) {
 	t.Parallel()
 
-	originalReadState := readSystemVolumeState
-	originalReadSource := readSystemOutputSource
-	defer func() {
-		readSystemVolumeState = originalReadState
-		readSystemOutputSource = originalReadSource
-	}()
-
-	readSystemVolumeState = func(context.Context) (VolumeState, error) {
-		return VolumeState{Volume: 28, Muted: false}, nil
+	backend := &volumeSystemBackend{
+		readState: func(context.Context) (VolumeState, error) {
+			return VolumeState{Volume: 28, Muted: false}, nil
+		},
+		readSource: func(context.Context) (string, error) {
+			return "Studio Display XDR 스피커", nil
+		},
+		normalizeName: normalizeAudioSourceName,
 	}
-	readSystemOutputSource = func(context.Context) (string, error) {
-		return "Studio Display XDR 스피커", nil
-	}
-
-	backend := newVolumeSystemBackend()
 
 	state, err := backend.State(context.Background())
 	if err != nil {
@@ -357,18 +351,13 @@ func TestNormalizeOutputSourceNameNormalizesDecomposedHangul(t *testing.T) {
 func TestVolumeSystemBackendSetVolumeDoesNotMuteWhenUnmuted(t *testing.T) {
 	t.Parallel()
 
-	originalSetVolume := setSystemOutputVolume
-	defer func() {
-		setSystemOutputVolume = originalSetVolume
-	}()
-
-	var gotPercent int
-	setSystemOutputVolume = func(_ context.Context, percent int) error {
-		gotPercent = percent
-		return nil
+	gotPercent := -1
+	backend := &volumeSystemBackend{
+		setVolume: func(_ context.Context, percent int) error {
+			gotPercent = percent
+			return nil
+		},
 	}
-
-	backend := newVolumeSystemBackend()
 	backend.cachedState.Muted = false
 	backend.stateFetchedAt = time.Now()
 
@@ -386,18 +375,13 @@ func TestVolumeSystemBackendSetVolumeDoesNotMuteWhenUnmuted(t *testing.T) {
 func TestVolumeSystemBackendSetVolumePreservesMutedState(t *testing.T) {
 	t.Parallel()
 
-	originalSetVolume := setSystemOutputVolume
-	defer func() {
-		setSystemOutputVolume = originalSetVolume
-	}()
-
-	var gotPercent int
-	setSystemOutputVolume = func(_ context.Context, percent int) error {
-		gotPercent = percent
-		return nil
+	gotPercent := -1
+	backend := &volumeSystemBackend{
+		setVolume: func(_ context.Context, percent int) error {
+			gotPercent = percent
+			return nil
+		},
 	}
-
-	backend := newVolumeSystemBackend()
 	backend.cachedState.Muted = true
 	backend.stateFetchedAt = time.Now()
 
@@ -415,24 +399,19 @@ func TestVolumeSystemBackendSetVolumePreservesMutedState(t *testing.T) {
 func TestVolumeSystemBackendToggleMuteUsesCoreAudioMuteSetter(t *testing.T) {
 	t.Parallel()
 
-	originalReadState := readSystemVolumeState
-	originalSetMuted := setSystemOutputMuted
-	defer func() {
-		readSystemVolumeState = originalReadState
-		setSystemOutputMuted = originalSetMuted
-	}()
-
-	readSystemVolumeState = func(context.Context) (VolumeState, error) {
-		return VolumeState{Volume: 24, Muted: false}, nil
-	}
-
 	var mutedValues []bool
-	setSystemOutputMuted = func(_ context.Context, muted bool) error {
-		mutedValues = append(mutedValues, muted)
-		return nil
+	backend := &volumeSystemBackend{
+		readState: func(context.Context) (VolumeState, error) {
+			return VolumeState{Volume: 24, Muted: false}, nil
+		},
+		readSource: func(context.Context) (string, error) {
+			return "Test Output", nil
+		},
+		setMuted: func(_ context.Context, muted bool) error {
+			mutedValues = append(mutedValues, muted)
+			return nil
+		},
 	}
-
-	backend := newVolumeSystemBackend()
 	if err := backend.ToggleMute(context.Background()); err != nil {
 		t.Fatalf("ToggleMute: %v", err)
 	}
@@ -469,24 +448,21 @@ func TestVolumeSourceNotifiesOnStateChange(t *testing.T) {
 }
 
 func TestVolumeSystemBackendChangeHandlerInvalidatesCache(t *testing.T) {
-	originalStartObserver := startSystemVolumeObserver
-	defer func() {
-		startSystemVolumeObserver = originalStartObserver
-	}()
+	t.Parallel()
 
 	var (
 		callback func()
 		stops    int
 		notified int
 	)
-	startSystemVolumeObserver = func(fn func()) (func(), error) {
-		callback = fn
-		return func() {
-			stops++
-		}, nil
+	backend := &volumeSystemBackend{
+		startObserver: func(fn func()) (func(), error) {
+			callback = fn
+			return func() {
+				stops++
+			}, nil
+		},
 	}
-
-	backend := newVolumeSystemBackend()
 	backend.cachedState = VolumeState{Source: "Studio Display XDR", Volume: 16}
 	backend.stateFetchedAt = time.Now()
 	backend.sourceFetchedAt = time.Now()

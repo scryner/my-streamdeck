@@ -90,7 +90,7 @@ OFF 및 길게 누르기에서는 0으로 초기화한다. 자식 종료 시각�
 ```sh
 go test ./... -count=1 -timeout=90s
 go test -race ./internal/widgets -run '^TestCaffeinate' -count=20 -timeout=90s
-go test -race ./... -parallel=1 -count=1 -timeout=90s
+go test -race ./... -count=10 -timeout=120s
 go vet ./...
 go build -o /tmp/my-streamdeck-lock-check .
 ```
@@ -105,14 +105,11 @@ go build -o /tmp/my-streamdeck-lock-check .
 OFF 기록 저장 실패 후 재시작, 정상 종료 기록의 1회 소비를 검증한다.
 파일 접근 오류 복구 후 오래된 실행 식별자의 ON 기록이 복원되지 않는지도 검증한다.
 
-전체 병렬 race 검사는 기존 `volume_touch_test.go`의
-`TestVolumeSystemBackendSetVolumeDoesNotMuteWhenUnmuted`와
-`TestVolumeSystemBackendSetVolumePreservesMutedState`가 전역 setter를 병렬로
-교체하는 경쟁 때문에 실패한다. `-parallel=1`로 실행해도 기존
-`play_touch_test.go`의 `TestPlayTouchWidgetDialRotateNavigatesWithDebounce` 및
-`TestPlayTouchWidgetDialRotateDebouncesSlowBackendByInputTime`에서 비동기 가짜
-플레이어의 카운터를 동기화 없이 읽는 경쟁이 검출된다. 이 테스트 파일들은 이번
-변경에서 수정하지 않았다. caffeinate 범위의 반복 race 검사는 별도로 실행한다.
+기존 전체 race 실패 원인도 수정했다. 볼륨 테스트는 전역 read/set/observer 함수를
+교체하지 않고 각 백엔드 인스턴스에 가짜 함수를 주입한다. 플레이어 테스트는 공유
+상태와 호출 카운터를 mutex로 보호하고, 작업 완료는 채널로 확인한다. 느린 백엔드
+검증도 채널로 실행을 보류하여 실제 기기나 재생 앱을 호출하지 않는다. 병렬 테스트를
+유지한 채 전체 race 검사를 수행한다.
 
 2026-10-29 검증 결과: 전체 일반 테스트, caffeinate 범위의 20회 반복 race 검사,
 앱 패키지 race 검사, `go vet ./...`, macOS 빌드는 통과했다. 전체 race 검사는
@@ -123,8 +120,14 @@ OFF 기록 저장 실패 후 재시작, 정상 종료 기록의 1회 소비를 �
 시작 차단, 정상 종료 기록의 소비와 실행 식별자 검증, 감독기의 작업 프로세스
 소유권 유지에 대한 회귀 테스트를 추가했다. 전체 일반 테스트, caffeinate 및 앱
 패키지의 각각 20회 반복 race 검사, `go vet ./...`, 임시 경로 빌드를 통과했다.
-기존 볼륨·플레이어 race 테스트 문제는 수정 범위에 포함하지 않았다. 서비스 교체와
+당시 볼륨·플레이어 race 테스트 문제는 수정 범위에 포함하지 않았다. 서비스 교체와
 실제 잠금·잠자기 검증은 수행하지 않았다.
+
+2026-10-30 전체 race 보완 결과: 볼륨·플레이어 테스트의 공유 상태 경쟁과 비동기
+완료 대기를 수정했다. 관련 테스트는 각각 20회 반복 race 검사에서 통과했고,
+`go test -race ./... -count=10 -timeout=120s`로 모든 패키지를 기본 병렬 설정에서
+10회 반복 실행하여 통과했다. `go vet ./...`도 통과했다. 이번 보완은 테스트와
+검증 문서만 변경했으며 서비스 교체나 실제 잠금·잠자기는 수행하지 않았다.
 
 ## 이후 수동 확인 절차 (이번 작업에서는 실행하지 않음)
 

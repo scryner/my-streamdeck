@@ -3,6 +3,7 @@ package widgets
 import (
 	"context"
 	"image"
+	"sync"
 	"testing"
 	"time"
 
@@ -11,16 +12,25 @@ import (
 )
 
 type fakePlayerBackend struct {
+	mu            sync.Mutex
 	state         playerPlaybackState
 	toggleCalls   int
 	nextCalls     int
 	previousCalls int
-	nextDelay     time.Duration
-	prevDelay     time.Duration
-	err           error
+	// Test gates are configured before handing the backend to the widget.
+	nextRelease <-chan struct{}
+	nextEntered chan struct{}
+	completed   chan string
+	err         error
+}
+
+func newFakePlayerBackend(state playerPlaybackState) *fakePlayerBackend {
+	return &fakePlayerBackend{state: state, completed: make(chan string, 16), nextEntered: make(chan struct{}, 16)}
 }
 
 func (f *fakePlayerBackend) State(context.Context) (playerPlaybackState, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.err != nil {
 		return playerPlaybackStateUnknown, f.err
 	}
@@ -28,6 +38,8 @@ func (f *fakePlayerBackend) State(context.Context) (playerPlaybackState, error) 
 }
 
 func (f *fakePlayerBackend) Toggle(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.toggleCalls++
 	if f.state == playerPlaybackStatePlaying {
 		f.state = playerPlaybackStatePaused
@@ -37,20 +49,57 @@ func (f *fakePlayerBackend) Toggle(context.Context) error {
 	return f.err
 }
 
-func (f *fakePlayerBackend) Next(context.Context) error {
-	if f.nextDelay > 0 {
-		time.Sleep(f.nextDelay)
+func (f *fakePlayerBackend) Next(ctx context.Context) error {
+	f.nextEntered <- struct{}{}
+	if f.nextRelease != nil {
+		select {
+		case <-f.nextRelease:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
+	f.mu.Lock()
 	f.nextCalls++
-	return f.err
+	err := f.err
+	f.mu.Unlock()
+	f.completed <- "next"
+	return err
 }
 
 func (f *fakePlayerBackend) Previous(context.Context) error {
-	if f.prevDelay > 0 {
-		time.Sleep(f.prevDelay)
-	}
+	f.mu.Lock()
 	f.previousCalls++
-	return f.err
+	err := f.err
+	f.mu.Unlock()
+	f.completed <- "previous"
+	return err
+}
+
+func (f *fakePlayerBackend) calls() (toggle, next, previous int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.toggleCalls, f.nextCalls, f.previousCalls
+}
+
+func waitForPlayerCall(t *testing.T, backend *fakePlayerBackend, want string) {
+	t.Helper()
+	select {
+	case got := <-backend.completed:
+		if got != want {
+			t.Fatalf("player call = %q, want %q", got, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %s", want)
+	}
+}
+
+func assertNoPlayerCallDuringDebounce(t *testing.T, backend *fakePlayerBackend) {
+	t.Helper()
+	select {
+	case got := <-backend.completed:
+		t.Fatalf("unexpected duplicate player call: %s", got)
+	case <-time.After(playSkipDebounceWindow):
+	}
 }
 
 func TestPlayTouchWidgetMetadata(t *testing.T) {
@@ -58,7 +107,7 @@ func TestPlayTouchWidgetMetadata(t *testing.T) {
 
 	widget, err := NewPlayTouchWidget(PlayTouchWidgetOptions{
 		ID:     decktouch.WIDGET_4,
-		Player: &fakePlayerBackend{state: playerPlaybackStateUnknown},
+		Player: newFakePlayerBackend(playerPlaybackStateUnknown),
 	})
 	if err != nil {
 		t.Fatalf("NewPlayTouchWidget: %v", err)
@@ -79,7 +128,7 @@ func TestPlayTouchWidgetMetadata(t *testing.T) {
 func TestPlayTouchWidgetTouchAndDialPressTogglePlayback(t *testing.T) {
 	t.Parallel()
 
-	backend := &fakePlayerBackend{state: playerPlaybackStatePaused}
+	backend := newFakePlayerBackend(playerPlaybackStatePaused)
 	widget, err := NewPlayTouchWidget(PlayTouchWidgetOptions{
 		ID:     decktouch.WIDGET_4,
 		Player: backend,
@@ -95,15 +144,15 @@ func TestPlayTouchWidgetTouchAndDialPressTogglePlayback(t *testing.T) {
 	if err := touch.OnDialPress(nil, &touch, nil); err != nil {
 		t.Fatalf("OnDialPress: %v", err)
 	}
-	if backend.toggleCalls != 2 {
-		t.Fatalf("expected 2 toggle calls, got %d", backend.toggleCalls)
+	if calls, _, _ := backend.calls(); calls != 2 {
+		t.Fatalf("expected 2 toggle calls, got %d", calls)
 	}
 }
 
 func TestPlayTouchWidgetDialRotateNavigatesWithDebounce(t *testing.T) {
 	t.Parallel()
 
-	backend := &fakePlayerBackend{state: playerPlaybackStatePlaying}
+	backend := newFakePlayerBackend(playerPlaybackStatePlaying)
 	widget, err := NewPlayTouchWidget(PlayTouchWidgetOptions{
 		ID:     decktouch.WIDGET_4,
 		Player: backend,
@@ -119,19 +168,18 @@ func TestPlayTouchWidgetDialRotateNavigatesWithDebounce(t *testing.T) {
 	if err := touch.OnDialRotate(nil, &touch, nil, 1); err != nil {
 		t.Fatalf("OnDialRotate debounced next: %v", err)
 	}
-	time.Sleep(20 * time.Millisecond)
-	if backend.nextCalls != 1 {
-		t.Fatalf("expected one next call, got %d", backend.nextCalls)
+	waitForPlayerCall(t, backend, "next")
+	assertNoPlayerCallDuringDebounce(t, backend)
+	if _, calls, _ := backend.calls(); calls != 1 {
+		t.Fatalf("expected one next call, got %d", calls)
 	}
-
-	time.Sleep(playSkipDebounceWindow + 10*time.Millisecond)
 
 	if err := touch.OnDialRotate(nil, &touch, nil, -2); err != nil {
 		t.Fatalf("OnDialRotate previous: %v", err)
 	}
-	time.Sleep(20 * time.Millisecond)
-	if backend.previousCalls != 1 {
-		t.Fatalf("expected one previous call, got %d", backend.previousCalls)
+	waitForPlayerCall(t, backend, "previous")
+	if _, _, calls := backend.calls(); calls != 1 {
+		t.Fatalf("expected one previous call, got %d", calls)
 	}
 }
 
@@ -140,7 +188,7 @@ func TestPlayTouchWidgetRenderProducesVisibleContent(t *testing.T) {
 
 	widget, err := NewPlayTouchWidget(PlayTouchWidgetOptions{
 		ID:     decktouch.WIDGET_4,
-		Player: &fakePlayerBackend{state: playerPlaybackStateUnknown},
+		Player: newFakePlayerBackend(playerPlaybackStateUnknown),
 	})
 	if err != nil {
 		t.Fatalf("NewPlayTouchWidget: %v", err)
@@ -171,10 +219,11 @@ func TestPlayTouchWidgetRenderProducesVisibleContent(t *testing.T) {
 func TestPlayTouchWidgetDialRotateDebouncesSlowBackendByInputTime(t *testing.T) {
 	t.Parallel()
 
-	backend := &fakePlayerBackend{
-		state:     playerPlaybackStatePlaying,
-		nextDelay: 200 * time.Millisecond,
-	}
+	backend := newFakePlayerBackend(playerPlaybackStatePlaying)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+	backend.nextRelease = release
 	widget, err := NewPlayTouchWidget(PlayTouchWidgetOptions{
 		ID:     decktouch.WIDGET_4,
 		Player: backend,
@@ -184,31 +233,39 @@ func TestPlayTouchWidgetDialRotateDebouncesSlowBackendByInputTime(t *testing.T) 
 	}
 
 	touch := widget.Touch()
-	start := time.Now()
-	if err := touch.OnDialRotate(nil, &touch, nil, 1); err != nil {
-		t.Fatalf("OnDialRotate first next: %v", err)
+	returned := make(chan error, 1)
+	go func() { returned <- touch.OnDialRotate(nil, &touch, nil, 1) }()
+	select {
+	case <-backend.nextEntered:
+	case <-time.After(time.Second):
+		t.Fatal("backend was never entered")
 	}
-	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
-		t.Fatalf("expected first rotate to return quickly, got %s", elapsed)
+	select {
+	case err := <-returned:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("dial handler waited for the blocked backend")
 	}
-
-	time.Sleep(20 * time.Millisecond)
-
 	if err := touch.OnDialRotate(nil, &touch, nil, 1); err != nil {
 		t.Fatalf("OnDialRotate second debounced next: %v", err)
 	}
 
-	time.Sleep(backend.nextDelay + 80*time.Millisecond)
-
-	if backend.nextCalls != 1 {
-		t.Fatalf("expected one next call after debounce window, got %d", backend.nextCalls)
+	// Completion is controlled by the test, so elapsed wall time cannot be
+	// mistaken for synchronization with the background command.
+	releaseOnce.Do(func() { close(release) })
+	waitForPlayerCall(t, backend, "next")
+	assertNoPlayerCallDuringDebounce(t, backend)
+	if _, calls, _ := backend.calls(); calls != 1 {
+		t.Fatalf("expected one next call after debounce window, got %d", calls)
 	}
 }
 
 func TestPlayTouchWidgetDialRotateShowsTransientSkipIcon(t *testing.T) {
 	t.Parallel()
 
-	backend := &fakePlayerBackend{state: playerPlaybackStatePlaying}
+	backend := newFakePlayerBackend(playerPlaybackStatePlaying)
 	widget, err := NewPlayTouchWidget(PlayTouchWidgetOptions{
 		ID:     decktouch.WIDGET_4,
 		Player: backend,
@@ -225,9 +282,14 @@ func TestPlayTouchWidgetDialRotateShowsTransientSkipIcon(t *testing.T) {
 		t.Fatalf("expected transient next icon, got %v", mode)
 	}
 
-	time.Sleep(playSkipDebounceWindow + 40*time.Millisecond)
-
-	if mode := widget.source.currentVisualMode(); mode != playerVisualModePlayPause {
-		t.Fatalf("expected visual mode to reset, got %v", mode)
+	waitForPlayerCall(t, backend, "next")
+	deadline := time.NewTimer(2 * time.Second)
+	defer deadline.Stop()
+	for widget.source.currentVisualMode() != playerVisualModePlayPause {
+		select {
+		case <-widget.source.Updates():
+		case <-deadline.C:
+			t.Fatal("transient visual mode did not reset")
+		}
 	}
 }

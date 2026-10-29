@@ -1,6 +1,9 @@
 package app
 
 import (
+	"crypto/rand"
+	"encoding/hex"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -12,10 +15,11 @@ var terminateChild = stopManagedChild
 type childSupervisor struct {
 	opts RunOptions
 
-	mu     sync.Mutex
-	opMu   sync.Mutex
-	child  *managedChild
-	closed bool
+	mu                   sync.Mutex
+	opMu                 sync.Mutex
+	child                *managedChild
+	closed               bool
+	checkpointGeneration string // protected by opMu, advanced only after launch succeeds
 }
 
 func newChildSupervisor(opts RunOptions) *childSupervisor {
@@ -30,7 +34,7 @@ func (s *childSupervisor) start() error {
 		debugf("child supervisor: start skipped because supervisor is closed")
 		return nil
 	}
-	if s.child != nil {
+	if s.currentChild() != nil {
 		return nil
 	}
 	return s.startLocked()
@@ -45,12 +49,14 @@ func (s *childSupervisor) restart() error {
 		return nil
 	}
 
-	current := s.detachChild()
+	current := s.currentChild()
 	if current != nil {
 		debugf("child supervisor: restarting child pid=%d", current.pid)
+		current.stopRequested.Store(true)
 		if err := terminateChild(current, childShutdownTimeout); err != nil {
 			return err
 		}
+		s.clearChild(current)
 	}
 
 	return s.startLocked()
@@ -63,22 +69,34 @@ func (s *childSupervisor) close() {
 	s.mu.Lock()
 	s.closed = true
 	current := s.child
-	s.child = nil
 	s.mu.Unlock()
 
 	if current != nil {
 		debugf("child supervisor: stopping child pid=%d", current.pid)
+		current.stopRequested.Store(true)
 		if err := terminateChild(current, childShutdownTimeout); err != nil {
 			log.Printf("child supervisor: stop child pid=%d failed: %v", current.pid, err)
+			return
 		}
+		s.clearChild(current)
 	}
 }
 
 func (s *childSupervisor) startLocked() error {
-	child, err := launchChild(s.opts)
+	opts := s.opts
+	if opts.caffeinateSessionDir != "" {
+		var generation [16]byte
+		if _, err := rand.Read(generation[:]); err != nil {
+			return fmt.Errorf("create worker generation: %w", err)
+		}
+		opts.caffeinateRestoreGeneration = s.checkpointGeneration
+		opts.caffeinateSaveGeneration = hex.EncodeToString(generation[:])
+	}
+	child, err := launchChild(opts)
 	if err != nil {
 		return err
 	}
+	s.checkpointGeneration = opts.caffeinateSaveGeneration
 
 	s.mu.Lock()
 	if s.closed {
@@ -130,10 +148,19 @@ func (s *childSupervisor) isClosed() bool {
 	return s.closed
 }
 
-func (s *childSupervisor) detachChild() *managedChild {
+func (s *childSupervisor) currentChild() *managedChild {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	current := s.child
-	s.child = nil
-	return current
+	return s.child
+}
+
+// Keep ownership until termination succeeds (or the waiter observes exit).
+// In particular, a failed stop must not make the next restart spawn a second
+// worker that could write the same saved intent and create another assertion.
+func (s *childSupervisor) clearChild(child *managedChild) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.child == child {
+		s.child = nil
+	}
 }

@@ -53,6 +53,8 @@ func startManagedChild(opts RunOptions) (*managedChild, error) {
 	cmd.Env = currentEnv()
 	if opts.caffeinateSessionDir != "" {
 		cmd.Env = append(cmd.Env, widgets.CaffeinateSessionDirEnv+"="+opts.caffeinateSessionDir)
+		cmd.Env = append(cmd.Env, widgets.CaffeinateRestoreGenerationEnv+"="+opts.caffeinateRestoreGeneration)
+		cmd.Env = append(cmd.Env, widgets.CaffeinateSaveGenerationEnv+"="+opts.caffeinateSaveGeneration)
 	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

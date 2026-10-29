@@ -3,7 +3,6 @@ package widgets
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -11,6 +10,18 @@ import (
 )
 
 const caffeinateLockPollInterval = 250 * time.Millisecond
+const caffeinateLockQueryTimeout = 250 * time.Millisecond
+
+var errCaffeinateQueryStale = errors.New("stale session query discarded")
+
+type caffeinateLockQuery struct {
+	done             chan struct{}
+	revision         uint64
+	intentGeneration uint64
+	locked           bool
+	err              error
+	discard          bool // protected by controller.mu; timed-out reads are never reused
+}
 
 type caffeinateLockEvent uint64
 
@@ -56,17 +67,22 @@ func (s caffeinateState) statusText() string {
 
 type caffeinateController struct {
 	// mu serializes intent, queries, process start/stop, and explicit sleep.
-	mu           sync.Mutex
-	backend      CaffeinateBackend
-	monitor      CaffeinateLockMonitor
-	store        CaffeinateIntentStore
-	now          func() time.Time
-	state        caffeinateState
-	runAt        time.Time
-	closed       bool
-	changed      func()
-	lastNotified caffeinateState
-	hasNotified  bool
+	mu               sync.Mutex
+	backend          CaffeinateBackend
+	monitor          CaffeinateLockMonitor
+	store            CaffeinateIntentStore
+	now              func() time.Time
+	state            caffeinateState
+	runAt            time.Time
+	closed           bool
+	changed          func()
+	lastNotified     caffeinateState
+	hasNotified      bool
+	query            *caffeinateLockQuery
+	intentGeneration uint64
+	ctx              context.Context
+	stop             chan struct{}
+	stopOnce         sync.Once
 
 	// Callbacks must never wait on mu: an event can arrive during a query or
 	// process start. The revision prevents that older result from resuming us.
@@ -81,7 +97,7 @@ type caffeinateController struct {
 }
 
 func newCaffeinateController(backend CaffeinateBackend, monitor CaffeinateLockMonitor, store CaffeinateIntentStore, now func() time.Time) *caffeinateController {
-	return &caffeinateController{backend: backend, monitor: monitor, store: store, now: now, wake: make(chan struct{}, 1)}
+	return &caffeinateController{backend: backend, monitor: monitor, store: store, now: now, wake: make(chan struct{}, 1), stop: make(chan struct{})}
 }
 
 func (c *caffeinateController) signal(event caffeinateLockEvent) {
@@ -110,7 +126,10 @@ func (c *caffeinateController) Start(ctx context.Context) error {
 	defer c.lifecycleMu.Unlock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.closed {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if c.stoppingLocked() {
 		return errors.New("caffeinate controller is closed")
 	}
 	if c.cancel != nil {
@@ -119,7 +138,10 @@ func (c *caffeinateController) Start(ctx context.Context) error {
 	if c.store != nil {
 		intent, err := c.store.Load()
 		if err != nil {
-			return fmt.Errorf("load caffeinate intent: %w", err)
+			// A bad checkpoint must not put the whole dashboard in a restart
+			// loop. Resume OFF, leaving a diagnostic for the failed restoration.
+			log.Printf("caffeinate: discard saved intent, starting OFF: %v", err)
+			intent = CaffeinateIntent{}
 		}
 		c.state.RequestedEnabled = intent.RequestedEnabled
 		c.state.ActiveDuration = max(0, intent.ActiveDuration)
@@ -132,6 +154,7 @@ func (c *caffeinateController) Start(ctx context.Context) error {
 		c.stopObserve = stop
 	}
 	ctx, c.cancel = context.WithCancel(ctx)
+	c.ctx = ctx
 	c.done = make(chan struct{})
 	if err := c.refreshLocked(); err != nil {
 		debugf("caffeinate: initial reconciliation: %v", err)
@@ -151,6 +174,8 @@ func (c *caffeinateController) run(ctx context.Context) {
 	}
 	for {
 		select {
+		case <-c.stop:
+			return
 		case <-ctx.Done():
 			return
 		case <-exited:
@@ -183,17 +208,91 @@ func (c *caffeinateController) run(ctx context.Context) {
 }
 
 func (c *caffeinateController) refreshLocked() error {
-	if c.closed {
+	if c.stoppingLocked() {
 		return nil
 	}
-	revision := c.event.Load() >> 2
-	locked, err := c.monitor.Locked()
-	c.state.LockKnown = err == nil && c.event.Load()>>2 == revision
-	c.state.Locked = locked
+	q := c.query
+	if q == nil {
+		q = &caffeinateLockQuery{done: make(chan struct{}), revision: c.event.Load() >> 2, intentGeneration: c.intentGeneration}
+		c.query = q
+		go func() {
+			q.locked, q.err = c.monitor.Locked()
+			close(q.done)
+		}()
+	}
+	// Native queries cannot be cancelled. Permit only one in flight, release
+	// the operation mutex while waiting, and abandon stale results. In
+	// particular OFF, a lock notification, and Close must not wait for it.
+	var contextDone <-chan struct{}
+	if c.ctx != nil {
+		contextDone = c.ctx.Done()
+	}
+	c.mu.Unlock()
+	timer := time.NewTimer(caffeinateLockQueryTimeout)
+	defer timer.Stop()
+	var err error
+	completed := false
+wait:
+	for {
+		select {
+		case <-q.done:
+			completed = true
+			break wait
+		case <-timer.C:
+			err = errors.New("session query timed out")
+			break wait
+		case <-c.stop:
+			err = errors.New("caffeinate controller is stopping")
+			break wait
+		case <-contextDone:
+			err = context.Canceled
+			break wait
+		case <-c.wake:
+			if c.event.Load()>>2 != q.revision {
+				err = errCaffeinateQueryStale
+				break wait
+			}
+		}
+	}
+	c.mu.Lock()
+	if !completed {
+		select {
+		case <-q.done:
+			completed = true
+		default:
+		}
+	}
+	if c.query != q {
+		return nil
+	} // another waiter already consumed this read
+	if completed {
+		c.query = nil
+	} else {
+		q.discard = true
+	}
+	if q.discard || q.intentGeneration != c.intentGeneration || c.event.Load()>>2 != q.revision {
+		err = errors.Join(err, errCaffeinateQueryStale)
+	}
+	if completed {
+		err = errors.Join(err, q.err)
+	}
+	if c.stoppingLocked() {
+		return err
+	}
+	c.state.LockKnown = err == nil
+	if completed && err == nil {
+		c.state.Locked = q.locked
+	}
+	if c.event.Load()>>2 != q.revision && caffeinateLockEvent(c.event.Load()&3) == caffeinateScreenLocked {
+		c.state.LockKnown, c.state.Locked = true, true
+	}
 	processErr := c.reconcileLocked()
 	// An event during Start must also undo that start before releasing mu.
-	if c.event.Load()>>2 != revision {
+	if c.stoppingLocked() || c.event.Load()>>2 != q.revision {
 		c.state.LockKnown = false
+		if caffeinateLockEvent(c.event.Load()&3) == caffeinateScreenLocked {
+			c.state.LockKnown, c.state.Locked = true, true
+		}
 		processErr = errors.Join(processErr, c.reconcileLocked())
 	}
 	c.notifyLocked()
@@ -201,7 +300,8 @@ func (c *caffeinateController) refreshLocked() error {
 }
 
 func (c *caffeinateController) reconcileLocked() error {
-	wantRunning := !c.closed && c.state.RequestedEnabled && c.state.LockKnown && !c.state.Locked
+	c.syncRunningLocked() // record an exit before a replacement can hide it
+	wantRunning := !c.stoppingLocked() && c.state.RequestedEnabled && c.state.LockKnown && !c.state.Locked
 	var err error
 	if wantRunning {
 		if !c.backend.Enabled() {
@@ -251,15 +351,19 @@ func (c *caffeinateController) toggle() error {
 }
 
 func (c *caffeinateController) setRequestedLocked(enabled bool) error {
-	if c.closed {
+	if c.stoppingLocked() {
 		return errors.New("caffeinate controller is closed")
 	}
 	c.state.RequestedEnabled = enabled
+	c.intentGeneration++
 	c.state.ActiveDuration = 0
 	c.runAt = c.now()
-	storeErr := c.saveLocked()
-	if storeErr != nil && enabled {
-		c.state.RequestedEnabled = false
+	var storeErr error
+	// ON is checkpointed only at orderly shutdown. A live worker leaves no
+	// restorable ON behind, so a failed OFF write followed by a crash cannot
+	// revive a previous request. Load consumes the previous checkpoint.
+	if !enabled {
+		storeErr = c.saveLocked()
 	}
 	// OFF never depends on a successful query (or a successful state write).
 	if !c.state.RequestedEnabled {
@@ -304,9 +408,7 @@ func (c *caffeinateController) shutdown() {
 		return
 	}
 	c.closed = true
-	c.closeErr = c.backend.Disable()
-	c.syncRunningLocked()
-	c.closeErr = errors.Join(c.closeErr, c.saveLocked())
+	c.cleanupLocked()
 	c.notifyLocked()
 	c.mu.Unlock()
 	if c.stopObserve != nil {
@@ -315,13 +417,42 @@ func (c *caffeinateController) shutdown() {
 }
 
 func (c *caffeinateController) Close() error {
+	c.stopOnce.Do(func() { close(c.stop) })
 	c.lifecycleMu.Lock()
 	defer c.lifecycleMu.Unlock()
+	c.mu.Lock()
+	wasClosed := c.closed
+	c.mu.Unlock()
 	if c.cancel != nil {
 		c.cancel()
 		<-c.done
 	} else {
 		c.shutdown()
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if wasClosed && c.closeErr != nil {
+		c.cleanupLocked()
+	}
 	return c.closeErr
+}
+
+func (c *caffeinateController) cleanupLocked() {
+	c.closeErr = c.backend.Disable()
+	c.syncRunningLocked()
+	if c.closeErr == nil {
+		c.closeErr = c.saveLocked()
+	}
+}
+
+func (c *caffeinateController) stoppingLocked() bool {
+	if c.closed || (c.ctx != nil && c.ctx.Err() != nil) {
+		return true
+	}
+	select {
+	case <-c.stop:
+		return true
+	default:
+		return false
+	}
 }

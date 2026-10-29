@@ -6,6 +6,7 @@ import (
 	"os"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -57,6 +58,7 @@ type synchronizedCaffeinateBackend struct {
 	starts, stops, sleeps int
 	onStart               func()
 	sleepErr              error
+	stopErr               error
 	exited                chan struct{}
 }
 
@@ -74,6 +76,9 @@ func (b *synchronizedCaffeinateBackend) Enable() error {
 func (b *synchronizedCaffeinateBackend) Disable() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.stopErr != nil {
+		return b.stopErr
+	}
 	if b.running {
 		b.stops++
 	}
@@ -246,7 +251,7 @@ func TestCaffeinateDiscardsQueriesAndStartsOvertakenByLock(t *testing.T) {
 			} else {
 				m.onRead = hook
 			}
-			if err := c.toggle(); err != nil {
+			if err := c.toggle(); err != nil && !errors.Is(err, errCaffeinateQueryStale) {
 				t.Fatal(err)
 			}
 			requireCaffeinateState(t, c, true, false)
@@ -271,16 +276,14 @@ func TestCaffeinateLockThenUnlockCannotValidateAnOlderQuery(t *testing.T) {
 		c.signal(caffeinateScreenLocked)
 		c.signal(caffeinateScreenUnlocked)
 	}
-	if err := c.toggle(); err != nil {
+	if err := c.toggle(); err != nil && !errors.Is(err, errCaffeinateQueryStale) {
 		t.Fatal(err)
 	}
 	if s := requireCaffeinateState(t, c, true, false); s.LockKnown {
 		t.Fatal("older query survived a lock/unlock burst")
 	}
 	m.onRead = nil
-	if err := refreshCaffeinate(c); err != nil {
-		t.Fatal(err)
-	}
+	waitCaffeinate(t, func() bool { _ = refreshCaffeinate(c); return c.State().Running })
 	requireCaffeinateState(t, c, true, true)
 }
 
@@ -489,10 +492,237 @@ func TestCaffeinateIntentStoreRejectsCorruption(t *testing.T) {
 	}
 	b := &synchronizedCaffeinateBackend{}
 	c := newCaffeinateController(b, &fakeCaffeinateLockMonitor{}, store, time.Now)
-	if err := c.Start(context.Background()); err == nil {
-		t.Fatal("corrupt saved intent accepted")
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatalf("corrupt saved intent should fall back to OFF: %v", err)
 	}
+	defer c.Close()
 	if b.Enabled() {
 		t.Fatal("corrupt intent started assertion")
+	}
+}
+
+func TestCaffeinateBlockedQueryDoesNotBlockStop(t *testing.T) {
+	t.Parallel()
+	for _, action := range []string{"OFF", "lock", "Close"} {
+		t.Run(action, func(t *testing.T) {
+			b := &synchronizedCaffeinateBackend{}
+			m := &fakeCaffeinateLockMonitor{}
+			c := newCaffeinateController(b, m, nil, time.Now)
+			defer c.Close()
+			if err := c.toggle(); err != nil {
+				t.Fatal(err)
+			}
+			entered, release := make(chan struct{}), make(chan struct{})
+			defer close(release)
+			m.onRead = func() { close(entered); <-release }
+			readDone := make(chan error, 1)
+			go func() { readDone <- refreshCaffeinate(c) }()
+			<-entered
+			stopped := make(chan error, 1)
+			go func() {
+				switch action {
+				case "OFF":
+					stopped <- c.toggle()
+				case "Close":
+					stopped <- c.Close()
+				case "lock":
+					c.signal(caffeinateScreenLocked)
+					stopped <- <-readDone
+				}
+			}()
+			select {
+			case <-stopped:
+			case <-time.After(time.Second):
+				t.Fatal("stop waited for the blocked native query")
+			}
+			if b.Enabled() {
+				t.Fatal("assertion survived stop while query was blocked")
+			}
+		})
+	}
+}
+
+func TestCaffeinateQueryTimeoutIsBoundedAndLateResultCannotResume(t *testing.T) {
+	t.Parallel()
+	b := &synchronizedCaffeinateBackend{}
+	m := &fakeCaffeinateLockMonitor{}
+	c := newCaffeinateController(b, m, nil, time.Now)
+	defer c.Close()
+	if err := c.toggle(); err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	var calls atomic.Int32
+	m.onRead = func() { calls.Add(1); <-release }
+	for range 2 {
+		if err := refreshCaffeinate(c); err == nil {
+			t.Fatal("blocked query did not time out")
+		}
+		requireCaffeinateState(t, c, true, false)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("spawned %d blocked readers", calls.Load())
+	}
+	c.mu.Lock()
+	pending := c.query
+	c.mu.Unlock()
+	m.set(true, nil)
+	close(release)
+	<-pending.done
+	// The timed-out query captured 'unlocked' before blocking. Never apply it.
+	if err := refreshCaffeinate(c); !errors.Is(err, errCaffeinateQueryStale) {
+		t.Fatalf("late result = %v", err)
+	}
+	if b.Enabled() {
+		t.Fatal("late unlocked result restarted assertion")
+	}
+	if err := refreshCaffeinate(c); err != nil {
+		t.Fatal(err)
+	}
+	if s := c.State(); !s.Locked || s.Running {
+		t.Fatalf("fresh state = %+v", s)
+	}
+}
+
+func TestCaffeinateCloseRetriesFailedCleanup(t *testing.T) {
+	t.Parallel()
+	b := &synchronizedCaffeinateBackend{}
+	c := newCaffeinateController(b, &fakeCaffeinateLockMonitor{}, nil, time.Now)
+	if err := c.toggle(); err != nil {
+		t.Fatal(err)
+	}
+	b.mu.Lock()
+	b.stopErr = errors.New("stop failed")
+	b.mu.Unlock()
+	if err := c.Close(); err == nil {
+		t.Fatal("expected cleanup failure")
+	}
+	if !b.Enabled() {
+		t.Fatal("test backend unexpectedly stopped")
+	}
+	b.mu.Lock()
+	b.stopErr = nil
+	b.mu.Unlock()
+	if err := c.Close(); err != nil {
+		t.Fatalf("cleanup retry: %v", err)
+	}
+	if b.Enabled() {
+		t.Fatal("cleanup retry left child running")
+	}
+	if err := c.toggle(); err == nil {
+		t.Fatal("closed controller accepted input")
+	}
+}
+
+func TestCaffeinateCancelledStartDoesNotConsumeIntentOrStart(t *testing.T) {
+	t.Parallel()
+	store := NewCaffeinateSessionStore(t.TempDir(), "key7")
+	if err := store.Save(CaffeinateIntent{RequestedEnabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	b, m := &synchronizedCaffeinateBackend{}, &fakeCaffeinateLockMonitor{}
+	c := newCaffeinateController(b, m, store, time.Now)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := c.Start(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start = %v", err)
+	}
+	if b.calls()[0] != 0 || m.handler != nil {
+		t.Fatal("cancelled Start performed work")
+	}
+	intent, err := store.Load()
+	if err != nil || !intent.RequestedEnabled {
+		t.Fatalf("Start consumed saved intent: %+v, %v", intent, err)
+	}
+}
+
+type failingCaffeinateSaveStore struct{ CaffeinateIntentStore }
+
+func (s failingCaffeinateSaveStore) Save(CaffeinateIntent) error {
+	return errors.New("disk write failed")
+}
+
+func TestCaffeinateFailedOffCheckpointCannotRestoreOldOn(t *testing.T) {
+	t.Parallel()
+	store := NewCaffeinateSessionStore(t.TempDir(), "key7")
+	if err := store.Save(CaffeinateIntent{RequestedEnabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	c := newCaffeinateController(&synchronizedCaffeinateBackend{}, &fakeCaffeinateLockMonitor{}, failingCaffeinateSaveStore{store}, time.Now)
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	requireCaffeinateState(t, c, true, true)
+	if err := c.toggle(); err == nil {
+		t.Fatal("expected OFF checkpoint failure")
+	}
+	if err := c.Close(); err == nil {
+		t.Fatal("expected shutdown checkpoint failure")
+	}
+	next := newCaffeinateController(&synchronizedCaffeinateBackend{}, &fakeCaffeinateLockMonitor{}, store, time.Now)
+	defer next.Close()
+	if err := next.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	requireCaffeinateState(t, next, false, false)
+}
+
+func TestCaffeinateOldQueryCannotEnableANewerOnRequest(t *testing.T) {
+	t.Parallel()
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	m := &fakeCaffeinateLockMonitor{onRead: func() { once.Do(func() { close(entered) }); <-release }}
+	b := &synchronizedCaffeinateBackend{}
+	c := newCaffeinateController(b, m, nil, time.Now)
+	defer c.Close()
+	first := make(chan error, 1)
+	go func() { first <- c.toggle() }()
+	<-entered
+	if err := c.toggle(); err != nil {
+		t.Fatal(err)
+	} // OFF while the first ON is querying
+	second := make(chan error, 1)
+	go func() { second <- c.toggle() }()
+	waitCaffeinate(t, func() bool { return c.State().RequestedEnabled })
+	m.set(true, nil)
+	close(release)
+	<-first
+	<-second
+	if b.calls()[0] != 0 {
+		t.Fatal("old unlocked read started the newer ON request")
+	}
+	if err := refreshCaffeinate(c); err != nil {
+		t.Fatal(err)
+	}
+	requireCaffeinateState(t, c, true, false)
+}
+
+func TestCaffeinateCloseInterruptsInitialQuery(t *testing.T) {
+	t.Parallel()
+	store := NewCaffeinateSessionStore(t.TempDir(), "key7")
+	if err := store.Save(CaffeinateIntent{RequestedEnabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	defer close(release)
+	m := &fakeCaffeinateLockMonitor{onRead: func() { close(entered); <-release }}
+	b := &synchronizedCaffeinateBackend{}
+	c := newCaffeinateController(b, m, store, time.Now)
+	started := make(chan error, 1)
+	go func() { started <- c.Start(context.Background()) }()
+	<-entered
+	closed := make(chan error, 1)
+	go func() { closed <- c.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close blocked behind initial query")
+	}
+	<-started
+	if b.calls()[0] != 0 {
+		t.Fatal("shutdown started a restored assertion")
 	}
 }

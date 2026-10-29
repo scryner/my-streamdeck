@@ -463,9 +463,10 @@ func buildButtonWidget(def ButtonWidgetConfig, key streamdeck.KeyID, settings ma
 		return (*weatherWidget).Forecast(key), nil
 	case "caffeinate":
 		widget, err := widgets.NewCaffeinateWidget(widgets.CaffeinateWidgetOptions{
-			Key:         key,
-			Size:        widgets.DefaultClockWidgetSize,
-			IntentStore: widgets.NewCaffeinateSessionStore(os.Getenv(widgets.CaffeinateSessionDirEnv), fmt.Sprint(key)),
+			Key:  key,
+			Size: widgets.DefaultClockWidgetSize,
+			IntentStore: widgets.NewCaffeinateSessionStoreForWorker(os.Getenv(widgets.CaffeinateSessionDirEnv), fmt.Sprint(key),
+				os.Getenv(widgets.CaffeinateRestoreGenerationEnv), os.Getenv(widgets.CaffeinateSaveGenerationEnv)),
 		})
 		if err != nil {
 			return nil, err

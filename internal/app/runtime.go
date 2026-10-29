@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/color"
 	"log"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -462,8 +463,9 @@ func buildButtonWidget(def ButtonWidgetConfig, key streamdeck.KeyID, settings ma
 		return (*weatherWidget).Forecast(key), nil
 	case "caffeinate":
 		widget, err := widgets.NewCaffeinateWidget(widgets.CaffeinateWidgetOptions{
-			Key:  key,
-			Size: widgets.DefaultClockWidgetSize,
+			Key:         key,
+			Size:        widgets.DefaultClockWidgetSize,
+			IntentStore: widgets.NewCaffeinateSessionStore(os.Getenv(widgets.CaffeinateSessionDirEnv), fmt.Sprint(key)),
 		})
 		if err != nil {
 			return nil, err

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -15,6 +16,13 @@ var exitProcess = os.Exit
 
 func RunMenuBar(opts RunOptions) error {
 	SetVerboseLogging(opts.Verbose)
+	// Keep intent across wake-triggered worker restarts, but start OFF in each
+	// new menu bar session. The directory is private and removed on app exit.
+	directory, err := os.MkdirTemp("", "my-streamdeck-session-*")
+	if err != nil {
+		return fmt.Errorf("create caffeinate session: %w", err)
+	}
+	opts.caffeinateSessionDir = directory
 
 	supervisor := newChildSupervisor(opts)
 	var stopWakeObserver sync.Once
@@ -32,6 +40,7 @@ func RunMenuBar(opts RunOptions) error {
 				}
 			})
 			supervisor.close()
+			_ = os.RemoveAll(directory)
 		})
 	}
 	restartChild := func(reason string) {

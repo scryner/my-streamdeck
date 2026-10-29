@@ -72,3 +72,34 @@ func TestChildSupervisorRestartReturnsStopError(t *testing.T) {
 		t.Fatalf("restart() error = %v, want %v", err, expected)
 	}
 }
+
+func TestChildSupervisorPreservesCaffeinateSessionAcrossWakeRestart(t *testing.T) {
+	oldLaunch, oldTerminate := launchChild, terminateChild
+	t.Cleanup(func() { launchChild, terminateChild = oldLaunch, oldTerminate })
+	directory := t.TempDir()
+	var children []*managedChild
+	launchChild = func(opts RunOptions) (*managedChild, error) {
+		if opts.caffeinateSessionDir != directory {
+			t.Errorf("lost caffeinate session on launch: %q", opts.caffeinateSessionDir)
+		}
+		child := &managedChild{pid: len(children) + 1, doneCh: make(chan struct{})}
+		children = append(children, child)
+		return child, nil
+	}
+	terminateChild = func(child *managedChild, _ time.Duration) error {
+		child.stopRequested.Store(true)
+		close(child.doneCh)
+		return nil
+	}
+	s := newChildSupervisor(RunOptions{caffeinateSessionDir: directory})
+	defer s.close()
+	if err := s.start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.restart(); err != nil {
+		t.Fatal(err)
+	}
+	if len(children) != 2 {
+		t.Fatalf("launches = %d", len(children))
+	}
+}

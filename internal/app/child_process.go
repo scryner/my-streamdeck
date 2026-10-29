@@ -8,6 +8,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/scryner/my-streamdeck/internal/widgets"
 )
 
 const (
@@ -49,6 +51,9 @@ func startManagedChild(opts RunOptions) (*managedChild, error) {
 
 	cmd := exec.Command(exe, childProcessArgs(opts)...)
 	cmd.Env = currentEnv()
+	if opts.caffeinateSessionDir != "" {
+		cmd.Env = append(cmd.Env, widgets.CaffeinateSessionDirEnv+"="+opts.caffeinateSessionDir)
+	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 

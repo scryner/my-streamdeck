@@ -2,6 +2,7 @@ package widgets
 
 import (
 	"context"
+	"errors"
 	"image"
 	"math"
 	"reflect"
@@ -16,9 +17,13 @@ type fakeCaffeinateBackend struct {
 	enableCalls  int
 	disableCalls int
 	sleepCalls   int
+	enableErr    error
 }
 
 func (b *fakeCaffeinateBackend) Enable() error {
+	if b.enableErr != nil {
+		return b.enableErr
+	}
 	b.enabled = true
 	b.enableCalls++
 	return nil
@@ -45,8 +50,9 @@ func TestCaffeinateWidgetToggleAndSleep(t *testing.T) {
 	backend := &fakeCaffeinateBackend{}
 	now := time.Date(2026, time.March, 21, 12, 0, 0, 0, time.UTC)
 	widget, err := NewCaffeinateWidget(CaffeinateWidgetOptions{
-		Key:     streamdeck.KEY_7,
-		Backend: backend,
+		Key:         streamdeck.KEY_7,
+		Backend:     backend,
+		LockMonitor: &fakeCaffeinateLockMonitor{},
 		Now: func() time.Time {
 			return now
 		},
@@ -61,8 +67,8 @@ func TestCaffeinateWidgetToggleAndSleep(t *testing.T) {
 	if !backend.enabled || backend.enableCalls != 1 {
 		t.Fatalf("expected caffeinate to be enabled once, got %+v", backend)
 	}
-	if enabledAt, ok := widget.source.enabledSince(); !ok || !enabledAt.Equal(now) {
-		t.Fatalf("expected widget to track enable time %s, got %v (ok=%v)", now, enabledAt, ok)
+	if state := widget.controller.State(); !state.RequestedEnabled || state.ActiveDuration != 0 {
+		t.Fatalf("unexpected initial state: %+v", state)
 	}
 
 	if err := widget.toggle(); err != nil {
@@ -71,7 +77,7 @@ func TestCaffeinateWidgetToggleAndSleep(t *testing.T) {
 	if backend.enabled || backend.disableCalls != 1 {
 		t.Fatalf("expected caffeinate to be disabled once, got %+v", backend)
 	}
-	if _, ok := widget.source.enabledSince(); ok {
+	if widget.controller.State().ActiveDuration != 0 {
 		t.Fatal("expected widget to clear enable time when toggled off")
 	}
 
@@ -88,7 +94,7 @@ func TestCaffeinateWidgetToggleAndSleep(t *testing.T) {
 	if backend.disableCalls != 2 || backend.sleepCalls != 1 {
 		t.Fatalf("unexpected backend calls after sleep: %+v", backend)
 	}
-	if _, ok := widget.source.enabledSince(); ok {
+	if widget.controller.State().ActiveDuration != 0 {
 		t.Fatal("expected widget to clear enable time before sleep")
 	}
 }
@@ -167,7 +173,7 @@ func TestCaffeinateSourceNextFrameDelay(t *testing.T) {
 	source := &caffeinateSource{
 		size:    DefaultClockWidgetSize,
 		now:     func() time.Time { return now },
-		state:   backend,
+		state:   newCaffeinateController(backend, &fakeCaffeinateLockMonitor{}, nil, func() time.Time { return now }),
 		updates: make(chan struct{}, 4),
 	}
 
@@ -185,14 +191,16 @@ func TestCaffeinateSourceNextFrameDelay(t *testing.T) {
 		t.Fatalf("expected no periodic updates after release, got %s", got)
 	}
 
-	backend.enabled = true
-	source.markEnabled(now)
+	if err := source.state.toggle(); err != nil {
+		t.Fatal(err)
+	}
 	if got := source.NextFrameDelay(); got != time.Second {
 		t.Fatalf("expected enabled updates at 1s, got %s", got)
 	}
 
-	backend.enabled = false
-	source.markDisabled()
+	if err := source.state.toggle(); err != nil {
+		t.Fatal(err)
+	}
 	if got := source.NextFrameDelay(); got != 0 {
 		t.Fatalf("expected no periodic updates after disable, got %s", got)
 	}
@@ -242,4 +250,74 @@ func TestCaffeinateElapsedParts(t *testing.T) {
 	if minutes != "0" || seconds != "00" {
 		t.Fatalf("expected negative durations to clamp to zero, got %q and %q", minutes, seconds)
 	}
+}
+
+func TestCaffeinateSourceDistinguishesRequestedAndPausedStates(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1000, 0)
+	b := &fakeCaffeinateBackend{}
+	m := &fakeCaffeinateLockMonitor{}
+	w, err := NewCaffeinateWidget(CaffeinateWidgetOptions{
+		Backend: b, LockMonitor: m, Now: func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.source.Close()
+	ctx := context.Background()
+	seen := make(map[uint64]string)
+	check := func(want string) (uint64, image.Image) {
+		t.Helper()
+		state := w.controller.State()
+		if state.statusText() != want {
+			t.Fatalf("status = %q, want %q", state.statusText(), want)
+		}
+		sig, err := w.source.StateSignature(ctx, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if prior, ok := seen[sig]; ok {
+			t.Fatalf("%s reused %s's rendering signature", want, prior)
+		}
+		seen[sig] = want
+		frame, err := w.source.FrameAt(ctx, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sig, frame
+	}
+	check("OFF")
+	if err := w.toggle(); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(5 * time.Second)
+	check("ON")
+	m.set(true, nil)
+	if err := refreshCaffeinate(w.controller); err != nil {
+		t.Fatal(err)
+	}
+	pausedSignature, pausedFrame := check("ON / LOCK")
+	now = now.Add(time.Hour)
+	sig, err := w.source.StateSignature(ctx, 0)
+	if err != nil || sig != pausedSignature {
+		t.Fatal("paused timer changed rendering signature")
+	}
+	frame, err := w.source.FrameAt(ctx, 0)
+	if err != nil || !reflect.DeepEqual(frame, pausedFrame) {
+		t.Fatal("paused UI kept ticking")
+	}
+	if delay := w.source.NextFrameDelay(); delay != 0 {
+		t.Fatalf("paused render polling = %s", delay)
+	}
+	m.set(false, errors.New("query failed"))
+	if err := refreshCaffeinate(w.controller); err == nil {
+		t.Fatal("expected query error")
+	}
+	check("ON / WAIT")
+	m.set(false, nil)
+	b.enableErr = errors.New("start failed")
+	if err := refreshCaffeinate(w.controller); err == nil {
+		t.Fatal("expected start error")
+	}
+	check("ON / RETRY")
 }

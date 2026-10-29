@@ -64,6 +64,13 @@ settings:
   - qui.access_token: INPUT-YOUR-QUI-ACCESS-TOKEN
 ```
 
+## Caffeinate
+
+A short press toggles the requested ON/OFF setting. While ON, screen locking pauses
+this app's sleep prevention and unlocking resumes it. The timer counts only time
+actually preventing sleep. A long press clears ON and requests immediate sleep.
+See [behavior, tests, and manual validation](docs/caffeinate.md).
+
 ## License
 
 This project is released under the MIT License. See [LICENSE](LICENSE).

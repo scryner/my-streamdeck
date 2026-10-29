@@ -2,11 +2,11 @@ package widgets
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
 	"math"
-	"os/exec"
 	"sync"
 	"time"
 
@@ -31,30 +31,31 @@ type CaffeinateBackend interface {
 }
 
 type CaffeinateWidgetOptions struct {
-	Key     streamdeck.KeyID
-	Size    int
-	Now     func() time.Time
-	Backend CaffeinateBackend
+	Key         streamdeck.KeyID
+	Size        int
+	Now         func() time.Time
+	Backend     CaffeinateBackend
+	LockMonitor CaffeinateLockMonitor
+	IntentStore CaffeinateIntentStore
 }
 
 type CaffeinateWidget struct {
-	key     streamdeck.KeyID
-	now     func() time.Time
-	backend CaffeinateBackend
-	source  *caffeinateSource
+	key        streamdeck.KeyID
+	now        func() time.Time
+	controller *caffeinateController
+	source     *caffeinateSource
 }
 
 type caffeinateSource struct {
 	size  int
 	now   func() time.Time
-	state CaffeinateBackend
+	state *caffeinateController
 	faces caffeinateFaces
 
 	mu         sync.RWMutex
 	pressToken uint64
 	pressed    bool
 	pressStart time.Time
-	enabledAt  time.Time
 	updates    chan struct{}
 }
 
@@ -62,11 +63,6 @@ type caffeinateFaces struct {
 	title  font.Face
 	timer  font.Face
 	status font.Face
-}
-
-type commandCaffeinateBackend struct {
-	mu  sync.Mutex
-	cmd *exec.Cmd
 }
 
 func NewCaffeinateWidget(options CaffeinateWidgetOptions) (*CaffeinateWidget, error) {
@@ -77,7 +73,10 @@ func NewCaffeinateWidget(options CaffeinateWidgetOptions) (*CaffeinateWidget, er
 		options.Now = time.Now
 	}
 	if options.Backend == nil {
-		options.Backend = &commandCaffeinateBackend{}
+		options.Backend = newCommandCaffeinateBackend()
+	}
+	if options.LockMonitor == nil {
+		options.LockMonitor = systemCaffeinateLockMonitor{}
 	}
 
 	faces, err := loadCaffeinateFaces(options.Size)
@@ -85,18 +84,17 @@ func NewCaffeinateWidget(options CaffeinateWidgetOptions) (*CaffeinateWidget, er
 		return nil, err
 	}
 
+	controller := newCaffeinateController(options.Backend, options.LockMonitor, options.IntentStore, options.Now)
+	source := &caffeinateSource{
+		size: options.Size, now: options.Now, state: controller, faces: faces,
+		updates: make(chan struct{}, 1),
+	}
+	controller.changed = source.notifyUpdate
 	return &CaffeinateWidget{
-		key:     options.Key,
-		now:     options.Now,
-		backend: options.Backend,
-		source: &caffeinateSource{
-			size:      options.Size,
-			now:       options.Now,
-			state:     options.Backend,
-			faces:     faces,
-			enabledAt: initialEnabledAt(options.Backend, options.Now),
-			updates:   make(chan struct{}, 1),
-		},
+		key:        options.Key,
+		now:        options.Now,
+		controller: controller,
+		source:     source,
 	}, nil
 }
 
@@ -161,28 +159,11 @@ func (w *CaffeinateWidget) handlePress(k *streamdeck.Key) error {
 }
 
 func (w *CaffeinateWidget) toggle() error {
-	if w.backend.Enabled() {
-		if err := w.backend.Disable(); err != nil {
-			return err
-		}
-		w.source.markDisabled()
-		return nil
-	}
-	if err := w.backend.Enable(); err != nil {
-		return err
-	}
-	w.source.markEnabled(w.now())
-	return nil
+	return w.controller.toggle()
 }
 
 func (w *CaffeinateWidget) sleepNow() error {
-	if w.backend.Enabled() {
-		if err := w.backend.Disable(); err != nil {
-			return err
-		}
-		w.source.markDisabled()
-	}
-	return w.backend.Sleep()
+	return w.controller.sleepNow()
 }
 
 type longPressResult struct {
@@ -190,8 +171,8 @@ type longPressResult struct {
 	err       error
 }
 
-func (s *caffeinateSource) Start(context.Context) error {
-	return nil
+func (s *caffeinateSource) Start(ctx context.Context) error {
+	return s.state.Start(ctx)
 }
 
 func (s *caffeinateSource) NextFrameDelay() time.Duration {
@@ -201,7 +182,7 @@ func (s *caffeinateSource) NextFrameDelay() time.Duration {
 	if pressed {
 		return time.Second / caffeinateWidgetFrameRate
 	}
-	if s.state != nil && s.state.Enabled() {
+	if s.state != nil && s.state.State().Running {
 		return time.Second
 	}
 	return 0
@@ -237,21 +218,18 @@ func (s *caffeinateSource) StateSignature(ctx context.Context, _ time.Duration) 
 		fillStartY = int(math.Round(float64(s.size) * (1 - displayProgress)))
 	}
 
-	enabled := false
+	state := caffeinateState{}
 	if s.state != nil {
-		enabled = s.state.Enabled()
+		state = s.state.State()
 	}
 
 	sum := newStateHash()
-	sum = addStateHashBool(sum, enabled)
+	sum = addStateHashBool(sum, state.RequestedEnabled)
+	sum = addStateHashBool(sum, state.Running)
+	sum = addStateHashBool(sum, state.LockKnown)
+	sum = addStateHashBool(sum, state.Locked)
+	sum = addStateHashInt64(sum, int64(state.ActiveDuration/time.Second))
 	sum = addStateHashInt(sum, fillStartY)
-
-	if enabledAt, ok := s.enabledSince(); ok {
-		sum = addStateHashBool(sum, true)
-		sum = addStateHashInt64(sum, int64(now.Sub(enabledAt)/time.Second))
-	} else {
-		sum = addStateHashBool(sum, false)
-	}
 
 	return sum, nil
 }
@@ -261,13 +239,11 @@ func (s *caffeinateSource) Duration() time.Duration {
 }
 
 func (s *caffeinateSource) Close() error {
-	if err := closeFaces(s.faces.title, s.faces.timer, s.faces.status); err != nil {
-		return err
+	var err error
+	if s.state != nil {
+		err = s.state.Close()
 	}
-	if s.state == nil {
-		return nil
-	}
-	return s.state.Disable()
+	return errors.Join(err, closeFaces(s.faces.title, s.faces.timer, s.faces.status))
 }
 
 func (s *caffeinateSource) beginPress(now time.Time) uint64 {
@@ -296,29 +272,6 @@ func (s *caffeinateSource) endPress(token uint64) {
 	}
 	s.pressed = false
 	s.notifyUpdate()
-}
-
-func (s *caffeinateSource) markEnabled(now time.Time) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.enabledAt = now
-	s.notifyUpdate()
-}
-
-func (s *caffeinateSource) markDisabled() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.enabledAt = time.Time{}
-	s.notifyUpdate()
-}
-
-func (s *caffeinateSource) enabledSince() (time.Time, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if s.enabledAt.IsZero() {
-		return time.Time{}, false
-	}
-	return s.enabledAt, true
 }
 
 func (s *caffeinateSource) notifyUpdate() {
@@ -366,9 +319,9 @@ func (s *caffeinateSource) render(dst *image.RGBA) {
 	now := s.now()
 	progress := s.holdProgress(now)
 	displayProgress := easeOutProgress(progress)
-	isEnabled := false
+	state := caffeinateState{}
 	if s.state != nil {
-		isEnabled = s.state.Enabled()
+		state = s.state.State()
 	}
 	fillSolid(dst, color.RGBA{R: 14, G: 16, B: 18, A: 255})
 
@@ -382,21 +335,24 @@ func (s *caffeinateSource) render(dst *image.RGBA) {
 	headerCenterY := float64(s.size)*0.32 - rowGapOffset
 	statusCenterY := float64(s.size)*0.53 + rowGapOffset
 	headerColor := color.RGBA{R: 227, G: 231, B: 236, A: 255}
-	status := "OFF"
+	status := state.statusText()
 	statusColor := color.RGBA{R: 171, G: 178, B: 186, A: 255}
-	if isEnabled {
+	if state.RequestedEnabled {
 		headerColor = color.RGBA{R: 233, G: 237, B: 242, A: 255}
-		if enabledAt, ok := s.enabledSince(); ok {
-			drawCaffeinateElapsedTimer(dst, s.faces.timer, now.Sub(enabledAt), centerX, headerCenterY, headerColor)
-		} else {
-			drawCenteredText(dst, s.faces.title, "CAFFEINATE", centerX, centeredTextBaselineY(s.faces.title, headerCenterY), headerColor)
-		}
-		status = "ON"
+		drawCaffeinateElapsedTimer(dst, s.faces.timer, state.ActiveDuration, centerX, headerCenterY, headerColor)
 		statusColor = color.RGBA{R: 105, G: 233, B: 137, A: 255}
+		if !state.Running {
+			statusColor = color.RGBA{R: 255, G: 190, B: 92, A: 255}
+		}
 	} else {
 		drawCenteredText(dst, s.faces.title, "CAFFEINATE", centerX, centeredTextBaselineY(s.faces.title, headerCenterY), headerColor)
 	}
-	drawCenteredText(dst, s.faces.status, status, centerX, centeredTextBaselineY(s.faces.status, statusCenterY), statusColor)
+	statusFace := s.faces.status
+	if status != "ON" && status != "OFF" {
+		statusFace = s.faces.title
+		statusColor = color.RGBA{R: 255, G: 190, B: 92, A: 255}
+	}
+	drawCenteredText(dst, statusFace, status, centerX, centeredTextBaselineY(statusFace, statusCenterY), statusColor)
 }
 
 func easeOutProgress(progress float64) float64 {
@@ -426,13 +382,6 @@ func gaugeFilledRawProgress(size int) float64 {
 
 func shouldToggleOnRelease(duration time.Duration) bool {
 	return duration <= caffeinateTapDuration
-}
-
-func initialEnabledAt(backend CaffeinateBackend, now func() time.Time) time.Time {
-	if backend == nil || !backend.Enabled() {
-		return time.Time{}
-	}
-	return now()
 }
 
 func caffeinateElapsedParts(elapsed time.Duration) (string, string) {
@@ -574,56 +523,4 @@ func loadCaffeinateFaces(size int) (caffeinateFaces, error) {
 		timer:  timer,
 		status: status,
 	}, nil
-}
-
-func (b *commandCaffeinateBackend) Enable() error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	if b.cmd != nil {
-		return nil
-	}
-
-	cmd := exec.Command("/usr/bin/caffeinate", "-di")
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start caffeinate: %w", err)
-	}
-	b.cmd = cmd
-	return nil
-}
-
-func (b *commandCaffeinateBackend) Disable() error {
-	b.mu.Lock()
-	cmd := b.cmd
-	b.cmd = nil
-	b.mu.Unlock()
-
-	if cmd == nil {
-		return nil
-	}
-	if cmd.Process == nil {
-		return nil
-	}
-	if err := cmd.Process.Kill(); err != nil {
-		return fmt.Errorf("stop caffeinate: %w", err)
-	}
-	_ = cmd.Wait()
-	return nil
-}
-
-func (b *commandCaffeinateBackend) Sleep() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "/usr/bin/osascript", "-e", `tell application "System Events" to sleep`)
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("sleep system: %w", err)
-	}
-	return nil
-}
-
-func (b *commandCaffeinateBackend) Enabled() bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.cmd != nil
 }
